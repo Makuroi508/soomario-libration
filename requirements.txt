@@ -1,0 +1,6 @@
+flask>=3.0
+requests>=2.31
+python-dotenv>=1.0
+apscheduler>=3.10
+hyperliquid-python-sdk>=0.22.0
+eth-account>=0.13.0
