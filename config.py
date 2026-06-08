@@ -95,7 +95,7 @@ NOTIONAL_FRAC = _f("NOTIONAL_FRAC", 0.20)  # 20% of equity notional per position
 MAX_CONCURRENT = int(LEVERAGE / NOTIONAL_FRAC + 1e-9)
 
 # ─── Universe (volatile alt perps; main DEX only — no HIP-3) ────
-_DEFAULT_COINS = "SOL,AVAX,LINK,NEAR,ADA,DOGE,BCH,LTC,DOT,ATOM"
+_DEFAULT_COINS = "SOL,HYPE,AVAX,LINK,NEAR,ADA,DOGE,BCH,LTC,DOT,ATOM"
 COINS = [c.strip().upper() for c in os.getenv("COINS", _DEFAULT_COINS).split(",") if c.strip()]
 
 # ─── Timing ─────────────────────────────────────────────────────
