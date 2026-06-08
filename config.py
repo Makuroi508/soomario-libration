@@ -1,5 +1,5 @@
 """
-Soomario Swing Executor — Configuration
+Soomario Libration — Configuration
 ═══════════════════════════════════════
 All params via env with validated defaults. The frozen strategy values
 (RSI 14 / 4h, cross 50 long / 40 short, 0.55% trail, 10% hard stop, 5% daily
@@ -26,12 +26,14 @@ def _b(name, default="0"):
 
 
 # ─── Paths / state ──────────────────────────────────────────────
+NAME = "Soomario Libration"
+
 BASE_DIR  = Path(__file__).parent
 STATE_DIR = Path(os.getenv("STATE_PATH", str(BASE_DIR / "state")))
 STATE_DIR.mkdir(exist_ok=True, parents=True)
 
-LOG_FILE        = STATE_DIR / "swing.log"
-DB_PATH         = Path(os.getenv("DB_PATH", str(STATE_DIR / "swing.db")))
+LOG_FILE        = STATE_DIR / "libration.log"
+DB_PATH         = Path(os.getenv("DB_PATH", str(STATE_DIR / "libration.db")))
 ASSET_META_FILE = STATE_DIR / "asset_meta.json"
 # Append-only logs read by the dashboard (EQUITY_CURVE_SPEC.md v1.2)
 EQUITY_LOG = STATE_DIR / "equity_log.jsonl"
@@ -53,6 +55,11 @@ DRY_RUN         = _b("DRY_RUN")
 PAPER           = _b("PAPER")
 ENTRIES_ENABLED = _b("ENTRIES_ENABLED", "1")
 TRAIL_ENABLED   = _b("TRAIL_ENABLED", "1")
+
+# Paper-mode accounting (only used when PAPER=1). The executor simulates fills
+# against live prices and tracks its own equity, seeded once at first run.
+PAPER_START_EQUITY = _f("PAPER_START_EQUITY", 1000)
+PAPER_SLIPPAGE_PCT = _f("PAPER_SLIPPAGE_PCT", 0.0)  # adverse fill padding for realism
 
 # ─── Frozen strategy params (walk-forward validated) ────────────
 RSI_LEN       = _i("RSI_LEN", 14)
@@ -119,6 +126,7 @@ def is_cross_for(asset: str) -> bool:
 
 def summary() -> dict:
     return {
+        "name": NAME,
         "coins": COINS,
         "leverage": LEVERAGE,
         "notional_frac": NOTIONAL_FRAC,
