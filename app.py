@@ -28,6 +28,7 @@ try:
     import logging
     import threading
     import time
+    from datetime import datetime, timezone
 
     from utils import setup_logging, iso, save_json, tg_notify
     setup_logging()
@@ -71,12 +72,27 @@ def _write_status(db, pm, equity, total_upnl, marks):
             "trail_active": bool(p["trail_active"]), "opened_at": p["opened_at"],
         })
     acct = db.account()
+    inception = acct.get("inception") or acct.get("daily_baseline") or equity or 0.0
+    realized_pnl = (acct["equity"] or 0.0) - inception
+    total_pnl = equity - inception
+    day = None
+    if acct.get("inception_ts"):
+        try:
+            d0 = datetime.fromisoformat(acct["inception_ts"])
+            day = (datetime.now(timezone.utc) - d0).days + 1
+        except (ValueError, TypeError):
+            day = None
     save_json(config.STATUS_FILE, {
         "ts": iso(),
         "name": config.NAME,
         "config": config_summary(),
         "equity": round(equity, 2),
         "total_upnl": round(total_upnl, 2),
+        "realized_pnl": round(realized_pnl, 2),
+        "total_pnl": round(total_pnl, 2),
+        "total_pnl_pct": round(total_pnl / inception * 100, 2) if inception else 0.0,
+        "inception": round(inception, 2),
+        "day": day,
         "open_positions": len(positions),
         "max_concurrent": pm.max_concurrent,
         "daily_halt": bool(acct["daily_halt"]),

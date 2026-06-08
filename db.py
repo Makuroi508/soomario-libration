@@ -26,7 +26,8 @@ logger = logging.getLogger("db")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  equity REAL, daily_baseline REAL, daily_halt INTEGER DEFAULT 0, last_reset TEXT
+  equity REAL, daily_baseline REAL, daily_halt INTEGER DEFAULT 0, last_reset TEXT,
+  inception REAL, inception_ts TEXT
 );
 CREATE TABLE IF NOT EXISTS positions (
   coin TEXT PRIMARY KEY, side TEXT, entry REAL, qty REAL, notional REAL, margin REAL,
@@ -81,6 +82,8 @@ class DB:
             ("positions", "intended_entry", "REAL"),
             ("trades", "friction_pct", "REAL"),
             ("trades", "fee", "REAL"),
+            ("account", "inception", "REAL"),
+            ("account", "inception_ts", "TEXT"),
         ]
         for table, col, typ in adds:
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}

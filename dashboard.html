@@ -86,6 +86,41 @@ a{color:inherit;text-decoration:none}
 .gauge i{flex:1;height:6px;border-radius:2px;background:rgba(123,94,167,0.18)}
 .gauge i.f{background:var(--gold)}
 
+/* ── hero2 strip (Aphelion-style) ── */
+.hero2{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:24px;align-items:start}
+.hero2-b{min-width:0}
+.hero2-big{font-family:var(--display);font-size:34px;font-weight:700;line-height:1.05;margin-top:4px}
+.hero2-stat{font-family:var(--display);font-size:22px;font-weight:600;margin-top:4px}
+/* ── status row ── */
+.srow{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-bottom:18px}
+.scard{background:linear-gradient(180deg,var(--surface),var(--panel));border:1px solid var(--border);
+  border-radius:12px;padding:14px 16px;border-left-width:3px}
+.scard-v{font-family:var(--display);font-size:18px;font-weight:600;margin-top:4px}
+.scard.ok{border-left-color:var(--gn)} .scard.warn{border-left-color:var(--rd)}
+.scard.paper{border-left-color:var(--cyan)} .scard.dry{border-left-color:var(--warn)}
+/* ── 60/40 split ── */
+.ov-grid{display:grid;grid-template-columns:1.5fr 1fr;gap:18px;align-items:start}
+.ov-left{min-width:0}
+.ov-right{position:sticky;top:80px}
+/* ── position cards (right column) ── */
+.poslist{display:flex;flex-direction:column;gap:9px;max-height:1180px;overflow-y:auto}
+.pcard{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 12px;border-left-width:3px}
+.pcard.up{border-left-color:var(--gn)} .pcard.down{border-left-color:var(--rd)} .pcard.armed{border-left-color:var(--gold)}
+.pc-top{display:flex;align-items:center;gap:8px}
+.pc-coin{font-weight:600;letter-spacing:.04em;font-size:13px}
+.pc-px{color:var(--dim);font-size:11px;margin-left:2px}
+.pc-px b{color:var(--text);font-weight:600}
+.pc-pnl{margin-left:auto;text-align:right;font-weight:600;font-size:13px}
+.pc-pnl small{display:block;font-size:10px;font-weight:500;opacity:.8}
+.pc-bar{height:5px;border-radius:3px;margin-top:8px;background:rgba(123,94,167,0.18);overflow:hidden}
+.pc-bar i{display:block;height:100%;border-radius:3px;background:var(--gold)}
+.pc-bar i.near{background:var(--rd)}
+.pc-meta{display:flex;justify-content:space-between;font-size:9.5px;color:var(--mute);margin-top:6px;letter-spacing:.03em}
+.pbadge{font-size:8.5px;letter-spacing:.1em;padding:2px 6px;border-radius:4px;text-transform:uppercase;font-weight:600}
+.pbadge.armed{background:rgba(212,168,67,0.15);color:var(--gold)}
+.pbadge.up{background:rgba(74,222,128,0.12);color:var(--gn)}
+.pbadge.down{background:rgba(248,113,113,0.12);color:var(--rd)}
+
 /* ── KPI row ── */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .kpi{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}
@@ -161,6 +196,11 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
 @media(max-width:820px){
   .sn-links{display:none}.sn-ham{display:block}
   .hero{grid-template-columns:1fr 1fr}.kpis{grid-template-columns:1fr 1fr}
+  .hero2{grid-template-columns:1fr 1fr;gap:16px}
+  .srow{grid-template-columns:1fr}
+  .ov-grid{grid-template-columns:1fr}
+  .ov-right{position:static}
+  .poslist{max-height:none}
 }
 </style>
 </head>
@@ -197,83 +237,118 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
 
   <!-- ════ OVERVIEW ════ -->
   <section class="tab on" id="tab-overview">
-    <div class="hero">
-      <div class="hero-b main">
-        <div class="hero-label">Performance Equity</div>
-        <div class="hero-value" id="hEquity">—</div>
-        <div class="hero-sub" id="hToday">—</div>
-        <div class="halt-badge" id="hHalt" style="display:none">Daily DD Halt</div>
+
+    <!-- hero strip -->
+    <div class="crd hero2">
+      <div class="hero2-b">
+        <div class="hero-label">Total P&amp;L</div>
+        <div class="hero2-big" id="hTotal">—</div>
+        <div class="hero-sub" id="hTotalSub">—</div>
       </div>
-      <div class="hero-b">
-        <div class="hero-label">Unrealized P&amp;L</div>
-        <div class="hero-stat" id="hUpnl">—</div>
+      <div class="hero2-b">
+        <div class="hero-label">Realized</div>
+        <div class="hero2-stat" id="hReal">—</div>
+        <div class="hero-sub">closed trades</div>
+      </div>
+      <div class="hero2-b">
+        <div class="hero-label">Unrealized</div>
+        <div class="hero2-stat" id="hUpnl">—</div>
         <div class="hero-sub" id="hUpnlSub">open positions</div>
       </div>
-      <div class="hero-b">
-        <div class="hero-label">Concurrency</div>
-        <div class="hero-stat" id="hConc">—</div>
-        <div class="gauge" id="hGauge"></div>
-      </div>
-      <div class="hero-b">
-        <div class="hero-label">Mode</div>
-        <div class="hero-stat" id="hMode">—</div>
-        <div class="hero-sub" id="hCoins">— coins</div>
+      <div class="hero2-b">
+        <div class="hero-label">Performance Equity</div>
+        <div class="hero2-stat" id="hEquity" style="color:var(--text)">—</div>
+        <div class="hero-sub">flow-neutral</div>
       </div>
     </div>
 
-    <!-- equity curve -->
-    <div class="crd">
-      <div class="crd-h">Equity Curve <span class="crd-tag live">LIVE</span>
-        <span class="crd-sub" id="eqCardSub">trade-return performance (flow-neutral)</span></div>
-      <div class="eq-wrap" id="eqWrap">
-        <canvas id="eqChart"></canvas>
-        <div class="eq-empty-msg" id="eqEmptyMsg">Not enough data in this range — try 1M or ALL</div>
-        <div class="eq-edge-label lo" id="eqLo"></div>
-        <div class="eq-edge-label hi" id="eqHi"></div>
-        <div class="eq-cross" id="eqCross"></div>
-        <div class="eq-dot" id="eqDot"></div>
-        <div class="eq-tip" id="eqTip">
-          <div class="eq-tip-eq" id="eqTipEq">$0.00</div>
-          <div class="eq-tip-ts" id="eqTipTs">—</div>
-          <div class="eq-tip-d" id="eqTipD">—</div>
+    <!-- status row -->
+    <div class="srow">
+      <div class="scard" id="scMode">
+        <div class="hero-label">Mode</div>
+        <div class="scard-v" id="sMode">—</div>
+        <div class="hero-sub" id="sModeSub">—</div>
+      </div>
+      <div class="scard" id="scDD">
+        <div class="hero-label">Daily Drawdown</div>
+        <div class="scard-v" id="sDD">—</div>
+        <div class="hero-sub" id="sDDSub">halt at -5% / UTC day</div>
+      </div>
+      <div class="scard">
+        <div class="hero-label">Concurrency</div>
+        <div class="scard-v" id="sConc">—</div>
+        <div class="gauge" id="hGauge" style="margin-top:8px"></div>
+      </div>
+    </div>
+
+    <!-- 60 / 40 split -->
+    <div class="ov-grid">
+      <div class="ov-left">
+        <!-- equity curve -->
+        <div class="crd">
+          <div class="crd-h">Equity Curve <span class="crd-tag live">LIVE</span>
+            <span class="crd-sub" id="eqCardSub">trade-return performance (flow-neutral)</span></div>
+          <div class="eq-wrap" id="eqWrap">
+            <canvas id="eqChart"></canvas>
+            <div class="eq-empty-msg" id="eqEmptyMsg">Not enough data in this range — try 1M or ALL</div>
+            <div class="eq-edge-label lo" id="eqLo"></div>
+            <div class="eq-edge-label hi" id="eqHi"></div>
+            <div class="eq-cross" id="eqCross"></div>
+            <div class="eq-dot" id="eqDot"></div>
+            <div class="eq-tip" id="eqTip">
+              <div class="eq-tip-eq" id="eqTipEq">$0.00</div>
+              <div class="eq-tip-ts" id="eqTipTs">—</div>
+              <div class="eq-tip-d" id="eqTipD">—</div>
+            </div>
+          </div>
+          <div class="tf-row" id="tfRow">
+            <button class="tf-btn" data-tf="1d">1D</button>
+            <button class="tf-btn" data-tf="1w">1W</button>
+            <button class="tf-btn" data-tf="1m">1M</button>
+            <button class="tf-btn on" data-tf="all">ALL</button>
+          </div>
+          <div class="eq-foot"><span id="eqFootL">—</span><span>Hyperliquid public API</span></div>
+          <div class="eq-legend">
+            <span><span class="ad" style="background:#D4A843"></span>Equity</span>
+            <span><span class="ad" style="background:#D4A843;border:1px solid #fff"></span>Entry</span>
+            <span><span class="ad" style="background:#5EEAD4"></span>Trail exit</span>
+            <span><span class="ad" style="background:#F87171"></span>Hard stop</span>
+          </div>
+        </div>
+
+        <!-- validation KPIs -->
+        <div class="crd">
+          <div class="crd-h">Live Validation <span class="crd-sub">the Phase-1 go/no-go numbers</span></div>
+          <div class="kpis">
+            <div class="kpi"><div class="kpi-label">Net %/Trade</div>
+              <div class="kpi-val" id="kNet">—</div><div class="kpi-tgt" id="kNetT">target &gt; +0.5%</div></div>
+            <div class="kpi"><div class="kpi-label">Win Rate</div>
+              <div class="kpi-val" id="kWin">—</div><div class="kpi-tgt" id="kWinT">target ~65%</div></div>
+            <div class="kpi"><div class="kpi-label">Fill Rate</div>
+              <div class="kpi-val" id="kFill">—</div><div class="kpi-tgt" id="kFillT">target ~85%</div></div>
+            <div class="kpi"><div class="kpi-label">Realized Friction</div>
+              <div class="kpi-val" id="kFric">—</div><div class="kpi-tgt" id="kFricT">awaiting live fills</div></div>
+          </div>
+        </div>
+
+        <!-- universe pulse -->
+        <div class="crd">
+          <div class="crd-h">Universe Pulse <span class="crd-sub">how close each coin is to a trade</span></div>
+          <div class="pulse" id="pulse"><div class="placeholder">warming up…</div></div>
         </div>
       </div>
-      <div class="tf-row" id="tfRow">
-        <button class="tf-btn" data-tf="1d">1D</button>
-        <button class="tf-btn" data-tf="1w">1W</button>
-        <button class="tf-btn" data-tf="1m">1M</button>
-        <button class="tf-btn on" data-tf="all">ALL</button>
-      </div>
-      <div class="eq-foot"><span id="eqFootL">—</span><span>Hyperliquid public API</span></div>
-      <div class="eq-legend">
-        <span><span class="ad" style="background:#D4A843"></span>Equity</span>
-        <span><span class="ad" style="background:#D4A843;border:1px solid #fff"></span>Entry</span>
-        <span><span class="ad" style="background:#5EEAD4"></span>Trail exit</span>
-        <span><span class="ad" style="background:#F87171"></span>Hard stop</span>
-      </div>
-    </div>
 
-    <!-- validation KPIs -->
-    <div class="crd">
-      <div class="crd-h">Live Validation <span class="crd-sub">the Phase-1 go/no-go numbers</span></div>
-      <div class="kpis">
-        <div class="kpi"><div class="kpi-label">Net %/Trade</div>
-          <div class="kpi-val" id="kNet">—</div><div class="kpi-tgt" id="kNetT">target &gt; +0.5%</div></div>
-        <div class="kpi"><div class="kpi-label">Win Rate</div>
-          <div class="kpi-val" id="kWin">—</div><div class="kpi-tgt" id="kWinT">target ~65%</div></div>
-        <div class="kpi"><div class="kpi-label">Fill Rate</div>
-          <div class="kpi-val" id="kFill">—</div><div class="kpi-tgt" id="kFillT">target ~85%</div></div>
-        <div class="kpi"><div class="kpi-label">Realized Friction</div>
-          <div class="kpi-val" id="kFric">—</div><div class="kpi-tgt" id="kFricT">awaiting live fills</div></div>
+      <!-- right: live open positions -->
+      <div class="ov-right">
+        <div class="crd" style="padding:14px">
+          <div class="crd-h">Open Positions <span class="crd-tag live">LIVE</span>
+            <span class="crd-sub" id="opCount">—</span></div>
+          <div class="poslist" id="ovPos"><div class="placeholder">no open positions</div></div>
+        </div>
       </div>
-    </div>
-
-    <!-- universe pulse -->
-    <div class="crd">
-      <div class="crd-h">Universe Pulse <span class="crd-sub">how close each coin is to a trade</span></div>
-      <div class="pulse" id="pulse"><div class="placeholder">warming up…</div></div>
     </div>
   </section>
+
 
   <section class="tab" id="tab-positions">
     <div class="tbl-head">
@@ -385,22 +460,71 @@ async function loadStatus(){
   banner.textContent = mode==='LIVE' ? 'LIVE — real capital at risk'
     : mode==='PAPER' ? 'PAPER — simulated fills, no real orders'
     : 'DRY RUN — reads live, orders are no-ops';
-  document.getElementById('hEquity').textContent = fmt$(s.equity);
-  const base = s.daily_baseline || 0;
-  const dPct = base>0 ? (s.equity-base)/base*100 : 0;
-  const today = document.getElementById('hToday');
-  today.textContent = 'today '+fmtPct(dPct);
-  today.className = 'hero-sub '+(dPct>=0?'up':'down');
-  document.getElementById('hHalt').style.display = s.daily_halt ? 'inline-block':'none';
-  const up = document.getElementById('hUpnl');
-  up.textContent = fmt$(s.total_upnl); up.className='hero-stat '+((s.total_upnl||0)>=0?'up':'down');
-  const maxc = s.max_concurrent || 10, opn = s.open_positions || 0;
-  document.getElementById('hConc').textContent = opn+' / '+maxc;
-  document.getElementById('hGauge').innerHTML = Array.from({length:maxc},(_,i)=>
-    `<i class="${i<opn?'f':''}"></i>`).join('');
-  document.getElementById('hMode').textContent = mode;
-  document.getElementById('hCoins').textContent = (s.config? (s.config.coins||[]).length : '—')+' coins';
+
+  // hero strip
+  const tot = s.total_pnl, totPct = s.total_pnl_pct;
+  const hT = document.getElementById('hTotal');
+  hT.textContent = (tot==null)?'—':((tot>=0?'+':'')+fmt$(Math.abs(tot)).replace('$',(tot<0?'-$':'$')));
+  hT.className = 'hero2-big '+((tot||0)>=0?'up':'down');
+  document.getElementById('hTotalSub').textContent =
+    (totPct!=null?fmtPct(totPct)+' since inception':'—') + (s.day?(' · day '+s.day):'');
+  const hR=document.getElementById('hReal'); hR.textContent=fmt$(s.realized_pnl); hR.className='hero2-stat '+((s.realized_pnl||0)>=0?'up':'down');
+  const hU=document.getElementById('hUpnl'); hU.textContent=fmt$(s.total_upnl); hU.className='hero2-stat '+((s.total_upnl||0)>=0?'up':'down');
+  document.getElementById('hUpnlSub').textContent=(s.open_positions||0)+' open positions';
+  document.getElementById('hEquity').textContent=fmt$(s.equity);
+
+  // status row
+  const scMode=document.getElementById('scMode');
+  scMode.className='scard '+(mode==='LIVE'?'ok':(mode==='PAPER'?'paper':'dry'));
+  document.getElementById('sMode').textContent=mode;
+  document.getElementById('sModeSub').textContent=((s.config&&s.config.coins)?s.config.coins.length:'—')+' coins · all systems nominal';
+  const base=s.daily_baseline||0, dPct=base>0?(s.equity-base)/base*100:0;
+  const sDD=document.getElementById('sDD'); sDD.textContent=fmtPct(dPct);
+  sDD.className='scard-v '+(dPct>=0?'up':'down');
+  const scDD=document.getElementById('scDD');
+  if(s.daily_halt){ scDD.className='scard warn'; document.getElementById('sDDSub').textContent='HALTED — no new entries until UTC rollover'; }
+  else { scDD.className='scard'; document.getElementById('sDDSub').textContent='halt at -5% / UTC day'; }
+  const maxc=s.max_concurrent||10, opn=s.open_positions||0;
+  document.getElementById('sConc').textContent=opn+' / '+maxc;
+  document.getElementById('hGauge').innerHTML=Array.from({length:maxc},(_,i)=>`<i class="${i<opn?'f':''}"></i>`).join('');
+
+  renderOverviewPositions(s.positions||[]);
 }
+
+function renderOverviewPositions(ps){
+  document.getElementById('opCount').textContent = ps.length+' open · '+(ps.filter(p=>p.trail_active).length)+' armed';
+  const el=document.getElementById('ovPos');
+  if(!ps.length){ el.innerHTML='<div class="placeholder">no open positions</div>'; return; }
+  // armed first, then by |uPnL|
+  ps=[...ps].sort((a,b)=>(b.trail_active-a.trail_active)||(Math.abs(b.upnl||0)-Math.abs(a.upnl||0)));
+  el.innerHTML=ps.map(p=>{
+    const isLong=p.side==='long', mark=p.mark, up=p.upnl||0;
+    const move=(mark!=null&&p.entry)?((isLong?mark-p.entry:p.entry-mark)/p.entry*100):null;
+    const cls=p.trail_active?'armed':(up>=0?'up':'down');
+    const badge=p.trail_active?'<span class="pbadge armed">armed</span>'
+      :(up>=0?'<span class="pbadge up">'+p.side.toUpperCase()+'</span>':'<span class="pbadge down">'+p.side.toUpperCase()+'</span>');
+    // cushion bar: how far mark sits between the stop (0%) and the peak (100%)
+    let fill=0, near=false;
+    if(mark!=null&&p.stop!=null&&p.peak!=null){
+      const span=Math.abs(p.peak-p.stop)||1;
+      fill=Math.max(0,Math.min(100,(isLong?(mark-p.stop):(p.stop-mark))/span*100));
+      near=fill<20;
+    }
+    const meta=p.trail_active
+      ? `stop $${fmtNum(p.stop)} · peak $${fmtNum(p.peak)}`
+      : `building · arms at +${0.55}% · stop $${fmtNum(p.stop)}`;
+    return `<div class="pcard ${cls}">
+      <div class="pc-top">
+        <span class="pc-coin">${p.coin}</span> ${badge}
+        <span class="pc-px">avg $${fmtNum(p.entry)} → <b>$${fmtNum(mark)}</b></span>
+        <span class="pc-pnl ${up>=0?'up':'down'}">${fmt$(up)}<small>${move!=null?fmtPct(move):''}</small></span>
+      </div>
+      <div class="pc-bar"><i class="${near?'near':''}" style="width:${fill}%"></i></div>
+      <div class="pc-meta"><span>${meta}</span><span>${fmtAge(p.opened_at)}</span></div>
+    </div>`;
+  }).join('');
+}
+function fmtNum(v){ if(v==null||isNaN(v))return'—'; const a=Math.abs(v); const d=a>=100?2:(a>=1?3:5); return Number(v).toFixed(d); }
 
 async function loadStats(){
   const s = await api('/api/stats'); if(!s) return;
