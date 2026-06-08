@@ -289,14 +289,22 @@ class HLClient:
 
     # ── Market data (REST) ────────────────────────────────────
 
-    def get_all_prices(self) -> dict[str, float]:
+    def get_all_prices(self, extra=None) -> dict[str, float]:
         """
-        Returns {short_name: price} across all DEXes in COINS.
+        Returns {short_name: price}. Covers everything in COINS, plus any
+        `extra` coins (e.g. open positions whose coin was dropped from COINS —
+        they still need a live mark so they get trailed, backstopped, and
+        marked on the dashboard until they exit).
         Main perps via allMids (one call), HIP-3 stocks via per-asset l2Book.
         """
         out: dict[str, float] = {}
-        main_assets = [a for a in COINS if not asset_dex(a)]
-        hip3_assets = [a for a in COINS if asset_dex(a)]
+        want = list(COINS)
+        for c in (extra or []):
+            cu = str(c).upper()
+            if cu not in want:
+                want.append(cu)
+        main_assets = [a for a in want if not asset_dex(a)]
+        hip3_assets = [a for a in want if asset_dex(a)]
 
         # 1. allMids for main perps
         if main_assets:
