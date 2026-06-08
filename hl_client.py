@@ -1,5 +1,5 @@
 """
-Soomario Swing Executor — Hyperliquid client (reused from Aphelion) (dual-DEX aware)
+Soomario Libration — Hyperliquid client (reused from Aphelion) (dual-DEX aware)
 ═══════════════════════════════════════════════
 Thin wrapper around the HL Python SDK with:
   • Retry/backoff for 429/500/502/503 + timeouts
@@ -1040,6 +1040,31 @@ class HLClient:
             return out[-(limit + 2):]
         except Exception as e:
             logger.warning(f"fetch_candles({hl_sym}) error: {e}")
+            return []
+
+    # ── User fills (actual execution prices → realized friction) ──
+
+    def get_user_fills(self, start_ms: Optional[int] = None) -> list[dict]:
+        """Recent fills for the account (no signing). With start_ms uses
+        userFillsByTime to bound the window; else the latest userFills snapshot.
+        Each fill: coin, px, sz, side, dir ('Close Long' etc.), closedPnl, fee,
+        time, oid. Used to book closes at the ACTUAL fill so realized friction
+        (intended stop vs real fill) becomes a measured number, not an estimate."""
+        if not HL_ACCOUNT_ADDRESS:
+            return []
+        if start_ms is not None:
+            body = {"type": "userFillsByTime", "user": HL_ACCOUNT_ADDRESS, "startTime": int(start_ms)}
+        else:
+            body = {"type": "userFills", "user": HL_ACCOUNT_ADDRESS}
+        try:
+            resp = requests.post(HL_API_URL, json=body, timeout=10)
+            if resp.status_code != 200:
+                logger.warning(f"userFills HTTP {resp.status_code}: {resp.text[:160]}")
+                return []
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"get_user_fills error: {e}")
             return []
 
     # ── Stop (trigger) orders — the always-resting safety net ──

@@ -31,11 +31,12 @@ CREATE TABLE IF NOT EXISTS account (
 CREATE TABLE IF NOT EXISTS positions (
   coin TEXT PRIMARY KEY, side TEXT, entry REAL, qty REAL, notional REAL, margin REAL,
   peak REAL, hard_stop REAL, hard_stop_id TEXT, trail_active INTEGER DEFAULT 0,
-  trail_stop REAL, opened_at TEXT
+  trail_stop REAL, intended_entry REAL, opened_at TEXT
 );
 CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, side TEXT, entry REAL, exit REAL,
-  qty REAL, ret_pct REAL, net_pct REAL, exit_reason TEXT, opened_at TEXT, closed_at TEXT
+  qty REAL, ret_pct REAL, net_pct REAL, friction_pct REAL, fee REAL,
+  exit_reason TEXT, opened_at TEXT, closed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS misses (
   id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, signal TEXT, reason TEXT, ts TEXT
@@ -64,6 +65,7 @@ class DB:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._migrate()
         # Ensure the singleton account row exists.
         if self._conn.execute("SELECT 1 FROM account WHERE id=1").fetchone() is None:
             self._conn.execute(
@@ -72,6 +74,19 @@ class DB:
             )
             self._conn.commit()
         logger.info(f"🗄️  DB ready at {self.path}")
+
+    def _migrate(self):
+        """Add columns introduced after first deploy (idempotent)."""
+        adds = [
+            ("positions", "intended_entry", "REAL"),
+            ("trades", "friction_pct", "REAL"),
+            ("trades", "fee", "REAL"),
+        ]
+        for table, col, typ in adds:
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self._conn.commit()
 
     # ── account ────────────────────────────────────────────────
     def account(self) -> dict:
@@ -102,16 +117,18 @@ class DB:
         self._conn.execute(
             "INSERT OR REPLACE INTO positions "
             "(coin, side, entry, qty, notional, margin, peak, hard_stop, hard_stop_id, "
-            " trail_active, trail_stop, opened_at) "
+            " trail_active, trail_stop, intended_entry, opened_at) "
             "VALUES (:coin,:side,:entry,:qty,:notional,:margin,:peak,:hard_stop,"
-            ":hard_stop_id,:trail_active,:trail_stop,:opened_at)",
+            ":hard_stop_id,:trail_active,:trail_stop,:intended_entry,:opened_at)",
             {
                 "coin": p["coin"].upper(), "side": p["side"], "entry": p["entry"],
                 "qty": p["qty"], "notional": p["notional"], "margin": p["margin"],
                 "peak": p["peak"], "hard_stop": p["hard_stop"],
                 "hard_stop_id": p.get("hard_stop_id"),
                 "trail_active": int(p.get("trail_active", 0)),
-                "trail_stop": p.get("trail_stop"), "opened_at": p.get("opened_at") or iso(),
+                "trail_stop": p.get("trail_stop"),
+                "intended_entry": p.get("intended_entry"),
+                "opened_at": p.get("opened_at") or iso(),
             },
         )
         self._conn.commit()
@@ -134,12 +151,15 @@ class DB:
         """Record a closed trade in SQLite and append a close event to trade_log.jsonl."""
         self._conn.execute(
             "INSERT INTO trades "
-            "(coin, side, entry, exit, qty, ret_pct, net_pct, exit_reason, opened_at, closed_at) "
-            "VALUES (:coin,:side,:entry,:exit,:qty,:ret_pct,:net_pct,:exit_reason,:opened_at,:closed_at)",
+            "(coin, side, entry, exit, qty, ret_pct, net_pct, friction_pct, fee, "
+            " exit_reason, opened_at, closed_at) "
+            "VALUES (:coin,:side,:entry,:exit,:qty,:ret_pct,:net_pct,:friction_pct,:fee,"
+            ":exit_reason,:opened_at,:closed_at)",
             {
                 "coin": t["coin"].upper(), "side": t["side"], "entry": t["entry"],
                 "exit": t["exit"], "qty": t["qty"], "ret_pct": t.get("ret_pct"),
-                "net_pct": t.get("net_pct"), "exit_reason": t.get("exit_reason"),
+                "net_pct": t.get("net_pct"), "friction_pct": t.get("friction_pct"),
+                "fee": t.get("fee"), "exit_reason": t.get("exit_reason"),
                 "opened_at": t.get("opened_at"), "closed_at": t.get("closed_at") or iso(),
             },
         )
@@ -161,6 +181,15 @@ class DB:
             "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (n,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def measured_friction(self):
+        """Mean realized round-trip friction % across trades that have it (live
+        only; paper books at idealized prices). None until live fills exist."""
+        row = self._conn.execute(
+            "SELECT AVG(friction_pct), COUNT(friction_pct) FROM trades "
+            "WHERE friction_pct IS NOT NULL").fetchone()
+        avg, n = row[0], row[1]
+        return (round(avg, 4), n) if n else (None, 0)
 
     # ── misses (fill-rate KPI) ─────────────────────────────────
     def log_miss(self, coin: str, signal: str, reason: str):

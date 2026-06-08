@@ -133,6 +133,30 @@ a{color:inherit;text-decoration:none}
 .eq-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;justify-content:center;font-size:9px;color:var(--dim)}
 .eq-legend .ad{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
 
+/* ── dense tables (Positions / Trades) ── */
+.tbl-head{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+.tbl-stat{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:11px 16px;flex:1;min-width:130px}
+.tbl-stat .l{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.tbl-stat .v{font-family:var(--display);font-size:19px;font-weight:600;margin-top:4px}
+.tblwrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px}
+table.dt{width:100%;border-collapse:collapse;font-size:12.5px;min-width:760px}
+table.dt th{text-align:right;padding:10px 12px;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--mute);font-weight:500;background:var(--panel);border-bottom:1px solid var(--border);white-space:nowrap}
+table.dt th:first-child,table.dt td:first-child{text-align:left}
+table.dt td{text-align:right;padding:11px 12px;border-bottom:1px solid rgba(45,27,78,0.5);white-space:nowrap}
+table.dt tr:last-child td{border-bottom:none}
+table.dt tr:hover td{background:rgba(123,94,167,0.07)}
+.side{font-size:9px;letter-spacing:.1em;padding:2px 7px;border-radius:4px;font-weight:600}
+.side.long{background:rgba(74,222,128,0.12);color:var(--gn)}
+.side.short{background:rgba(248,113,113,0.12);color:var(--rd)}
+.tag{font-size:8.5px;letter-spacing:.1em;padding:2px 6px;border-radius:4px;text-transform:uppercase}
+.tag.trail{background:rgba(94,234,212,0.12);color:var(--cyan)}
+.tag.hard{background:rgba(248,113,113,0.1);color:var(--rd)}
+.tag.dim{background:rgba(123,94,167,0.12);color:var(--dim)}
+.dist-bar{display:inline-block;width:52px;height:5px;border-radius:3px;background:rgba(123,94,167,0.18);vertical-align:middle;margin-left:7px;overflow:hidden}
+.dist-bar i{display:block;height:100%;border-radius:3px;background:var(--gold)}
+.dist-bar i.near{background:var(--rd)}
+
 .placeholder{color:var(--mute);font-size:12px;padding:30px;text-align:center;border:1px dashed var(--border);border-radius:10px}
 @media(max-width:820px){
   .sn-links{display:none}.sn-ham{display:block}
@@ -251,10 +275,82 @@ a{color:inherit;text-decoration:none}
     </div>
   </section>
 
-  <section class="tab" id="tab-positions"><div class="placeholder">Positions — next build step.</div></section>
-  <section class="tab" id="tab-trades"><div class="placeholder">Trades — next build step.</div></section>
-  <section class="tab" id="tab-shadow"><div class="placeholder">Trail A/B — next build step.</div></section>
-  <section class="tab" id="tab-universe"><div class="placeholder">Universe — next build step.</div></section>
+  <section class="tab" id="tab-positions">
+    <div class="tbl-head">
+      <div class="tbl-stat"><div class="l">Open</div><div class="v" id="pOpen">—</div></div>
+      <div class="tbl-stat"><div class="l">Notional Deployed</div><div class="v" id="pNotional">—</div></div>
+      <div class="tbl-stat"><div class="l">Free Margin</div><div class="v" id="pFree">—</div></div>
+      <div class="tbl-stat"><div class="l">Aggregate uPnL</div><div class="v" id="pUpnl">—</div></div>
+    </div>
+    <div class="crd" style="padding:0;overflow:hidden">
+      <div class="tblwrap">
+        <table class="dt">
+          <thead><tr>
+            <th>Coin</th><th>Side</th><th>Entry</th><th>Mark</th><th>uPnL</th><th>Move%</th>
+            <th>Notional</th><th>Peak</th><th>Stop</th><th>Dist→Stop</th><th>Trail</th><th>Age</th>
+          </tr></thead>
+          <tbody id="posBody"><tr><td colspan="12" style="text-align:center;color:var(--mute);padding:28px">no open positions</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+  <section class="tab" id="tab-trades">
+    <div class="tbl-head">
+      <div class="tbl-stat"><div class="l">Closed Trades</div><div class="v" id="tN">—</div></div>
+      <div class="tbl-stat"><div class="l">Win Rate</div><div class="v" id="tWin">—</div></div>
+      <div class="tbl-stat"><div class="l">Avg Net / Trade</div><div class="v" id="tAvg">—</div>
+        <div class="l" id="tAvgSub" style="text-transform:none;letter-spacing:0;margin-top:3px">vs +0.50% backtest</div></div>
+      <div class="tbl-stat"><div class="l">Best / Worst</div><div class="v" id="tBW" style="font-size:15px">—</div></div>
+      <div class="tbl-stat"><div class="l">Exit Split</div><div class="v" id="tSplit" style="font-size:15px">—</div></div>
+    </div>
+    <div class="crd" style="padding:0;overflow:hidden">
+      <div class="tblwrap">
+        <table class="dt">
+          <thead><tr>
+            <th>Coin</th><th>Side</th><th>Entry</th><th>Exit</th><th>Net %</th>
+            <th>Reason</th><th>Duration</th><th>Closed</th>
+          </tr></thead>
+          <tbody id="trBody"><tr><td colspan="8" style="text-align:center;color:var(--mute);padding:28px">no closed trades yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+  <section class="tab" id="tab-shadow">
+    <div class="tbl-head">
+      <div class="tbl-stat"><div class="l">Matched Trades</div><div class="v" id="abN">—</div>
+        <div class="chip-bar" style="margin-top:8px"><i id="abBar" style="background:var(--gold);width:0%"></i></div>
+        <div class="l" id="abNeed" style="text-transform:none;letter-spacing:0;margin-top:5px">need ~50 to decide</div></div>
+      <div class="tbl-stat"><div class="l">Measured Friction</div><div class="v" id="abFric">—</div>
+        <div class="l" id="abFricSub" style="text-transform:none;letter-spacing:0;margin-top:3px">round-trip, charged to shadows</div></div>
+      <div class="tbl-stat" style="flex:2"><div class="l">Verdict</div>
+        <div class="v" id="abVerdict" style="font-size:15px">—</div></div>
+    </div>
+    <div class="crd" style="padding:0;overflow:hidden">
+      <div class="tblwrap">
+        <table class="dt">
+          <thead><tr><th>Trail</th><th>Type</th><th>Trades</th><th>Median Net / Trade</th><th>Win Rate</th></tr></thead>
+          <tbody id="abBody"><tr><td colspan="5" style="text-align:center;color:var(--mute);padding:28px">A/B begins on the first live entry</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="crd"><div class="crd-sub" id="abNote" style="margin:0;font-size:11px;line-height:1.6">—</div></div>
+  </section>
+  <section class="tab" id="tab-universe">
+    <div class="tbl-head">
+      <div class="tbl-stat"><div class="l">Coins Tracked</div><div class="v" id="uTotal">—</div></div>
+      <div class="tbl-stat"><div class="l">Passing Filter</div><div class="v" id="uIncl">—</div></div>
+      <div class="tbl-stat" style="flex:2"><div class="l">Last Evaluated</div><div class="v" id="uEval" style="font-size:14px">—</div>
+        <div class="l" id="uThresh" style="text-transform:none;letter-spacing:0;margin-top:3px">—</div></div>
+    </div>
+    <div class="crd" style="padding:0;overflow:hidden">
+      <div class="tblwrap">
+        <table class="dt">
+          <thead><tr><th>Coin</th><th>State</th><th>ATR % (daily)</th><th>24h Volume</th><th>Filter</th><th>Notes</th></tr></thead>
+          <tbody id="uBody"><tr><td colspan="6" style="text-align:center;color:var(--mute);padding:28px">universe evaluation runs at startup…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 
 </div>
 
@@ -313,6 +409,17 @@ async function loadStats(){
   setKpi('kWin','kWinT', win==null?'—':win.toFixed(0)+'%', win!=null && win>=60, 'target ~65%', null);
   setKpi('kFill','kFillT', fill==null?'—':fill.toFixed(0)+'%', fill!=null && fill>=80, 'target ~85%',
          s.signals_seen?(s.signals_seen+' signals'):null);
+  const fr = s.realized_friction_pct, frN = s.friction_n||0;
+  const frEl = document.getElementById('kFric'), frT = document.getElementById('kFricT');
+  if(fr!=null && frN>=5){
+    frEl.textContent = fmtPct(fr);
+    frT.textContent = 'measured · '+frN+' trades';
+    frT.className = 'kpi-tgt '+(fr<=0.5?'hit':'miss');
+  } else {
+    frEl.textContent = '—';
+    frT.textContent = 'awaiting live fills';
+    frT.className = 'kpi-tgt';
+  }
 }
 function setKpi(valId, tgtId, val, hit, baseTgt, sub){
   document.getElementById(valId).textContent = val;
@@ -418,8 +525,209 @@ function hideEqCross(){['eqCross','eqDot','eqTip'].forEach(id=>document.getEleme
 document.addEventListener('mousemove',e=>{const w=document.getElementById('eqWrap'); if(!w||!w.contains(e.target)){hideEqCross();return;} onEqMove(e);});
 window.addEventListener('resize',()=>{if(eqState.points.length>=2)drawEqChart(eqState.points,eqState.events);});
 
+/* ── positions ── */
+function fmtAge(iso){
+  if(!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime(); if(isNaN(ms)||ms<0) return '—';
+  const h = Math.floor(ms/3.6e6), m = Math.floor((ms%3.6e6)/6e4);
+  if(h>=24){ const d=Math.floor(h/24); return d+'d '+(h%24)+'h'; }
+  return h>0 ? h+'h '+m+'m' : m+'m';
+}
+async function loadPositions(){
+  const s = await api('/api/status'); if(!s) return;
+  const ps = s.positions || [];
+  document.getElementById('pOpen').textContent = ps.length + ' / ' + (s.max_concurrent||10);
+  const totNot = ps.reduce((a,p)=>a+(p.notional||0),0);
+  const totMar = ps.reduce((a,p)=>a+(p.margin||0),0);
+  const totUp  = ps.reduce((a,p)=>a+(p.upnl||0),0);
+  document.getElementById('pNotional').textContent = fmt$(totNot);
+  const free = document.getElementById('pFree');
+  free.textContent = (s.equity!=null) ? fmt$(s.equity - totMar) : '—';
+  const up = document.getElementById('pUpnl'); up.textContent = fmt$(totUp);
+  up.className = 'v ' + (totUp>=0?'up':'down');
+
+  const body = document.getElementById('posBody');
+  if(!ps.length){ body.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--mute);padding:28px">no open positions</td></tr>'; return; }
+  body.innerHTML = ps.map(p=>{
+    const isLong = p.side==='long';
+    const mark = p.mark, move = (mark!=null && p.entry) ? ((isLong? mark-p.entry : p.entry-mark)/p.entry*100) : null;
+    // distance to stop as % of mark (cushion remaining before the stop fills)
+    let dist=null;
+    if(mark!=null && p.stop!=null) dist = (isLong ? (mark-p.stop)/mark : (p.stop-mark)/mark)*100;
+    const distPctClamp = dist!=null ? Math.max(0,Math.min(100, dist/10*100)) : 0; // 10% hard stop = full bar
+    const near = dist!=null && dist < 2;
+    const trailTag = p.trail_active ? '<span class="tag trail">TRAIL</span>'
+                                    : '<span class="tag hard">HARD</span>';
+    const upCls = (p.upnl||0)>=0?'up':'down', mvCls = (move||0)>=0?'up':'down';
+    return `<tr>
+      <td><b>${p.coin}</b></td>
+      <td><span class="side ${p.side}">${p.side.toUpperCase()}</span></td>
+      <td>${p.entry!=null?'$'+p.entry.toFixed(4):'—'}</td>
+      <td>${mark!=null?'$'+mark.toFixed(4):'—'}</td>
+      <td class="${upCls}">${p.upnl!=null?fmt$(p.upnl):'—'}</td>
+      <td class="${mvCls}">${move!=null?fmtPct(move):'—'}</td>
+      <td>${fmt$(p.notional)}</td>
+      <td>${p.peak!=null?'$'+p.peak.toFixed(4):'—'}</td>
+      <td>${p.stop!=null?'$'+p.stop.toFixed(4):'—'} ${trailTag}</td>
+      <td>${dist!=null?dist.toFixed(2)+'%':'—'}<span class="dist-bar"><i class="${near?'near':''}" style="width:${distPctClamp}%"></i></span></td>
+      <td>${p.trail_active?'<span class="tag trail">armed</span>':'<span class="tag dim">building</span>'}</td>
+      <td style="color:var(--dim)">${fmtAge(p.opened_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* ── trades ── */
+function fmtSpan(a,b){
+  if(!a||!b) return '—';
+  const ms=new Date(b).getTime()-new Date(a).getTime(); if(isNaN(ms)||ms<0)return'—';
+  const h=Math.floor(ms/3.6e6), m=Math.floor((ms%3.6e6)/6e4);
+  if(h>=24){const d=Math.floor(h/24);return d+'d '+(h%24)+'h';}
+  return h>0?h+'h '+m+'m':m+'m';
+}
+function reasonTag(r){
+  if(r==='TRAIL') return '<span class="tag trail">TRAIL</span>';
+  if(r==='HARD_STOP') return '<span class="tag hard">HARD STOP</span>';
+  return '<span class="tag dim">'+(r||'EXIT')+'</span>';
+}
+async function loadTrades(){
+  const d = await api('/api/trades?n=200'); if(!d) return;
+  const tr = d.trades || [];
+  const n = tr.length;
+  document.getElementById('tN').textContent = n;
+  if(!n){
+    document.getElementById('tWin').textContent='—';
+    document.getElementById('tAvg').textContent='—';
+    document.getElementById('tBW').textContent='—';
+    document.getElementById('tSplit').textContent='—';
+    document.getElementById('trBody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--mute);padding:28px">no closed trades yet</td></tr>';
+    return;
+  }
+  const nets = tr.map(t=>t.net_pct||0);
+  const wins = nets.filter(x=>x>0).length;
+  const avg = nets.reduce((a,b)=>a+b,0)/n;
+  const best = Math.max(...nets), worst = Math.min(...nets);
+  const trail = tr.filter(t=>t.exit_reason==='TRAIL').length;
+  const hard  = tr.filter(t=>t.exit_reason==='HARD_STOP').length;
+  document.getElementById('tWin').textContent = (wins/n*100).toFixed(0)+'%';
+  const avgEl = document.getElementById('tAvg');
+  avgEl.textContent = fmtPct(avg); avgEl.className = 'v '+(avg>=0?'up':'down');
+  const sub = document.getElementById('tAvgSub');
+  sub.textContent = (avg>0.5?'beating':'below')+' +0.50% backtest';
+  sub.style.color = avg>0.5 ? 'var(--gn)' : 'var(--warn)';
+  document.getElementById('tBW').innerHTML = `<span class="up">${fmtPct(best)}</span> / <span class="down">${fmtPct(worst)}</span>`;
+  document.getElementById('tSplit').innerHTML = `<span class="tag trail">${trail} TRAIL</span> <span class="tag hard">${hard} HARD</span>`;
+
+  document.getElementById('trBody').innerHTML = tr.map(t=>{
+    const cls=(t.net_pct||0)>=0?'up':'down';
+    return `<tr>
+      <td><b>${t.coin}</b></td>
+      <td><span class="side ${t.side}">${(t.side||'').toUpperCase()}</span></td>
+      <td>${t.entry!=null?'$'+t.entry.toFixed(4):'—'}</td>
+      <td>${t.exit!=null?'$'+t.exit.toFixed(4):'—'}</td>
+      <td class="${cls}">${t.net_pct!=null?fmtPct(t.net_pct):'—'}</td>
+      <td>${reasonTag(t.exit_reason)}</td>
+      <td style="color:var(--dim)">${fmtSpan(t.opened_at,t.closed_at)}</td>
+      <td style="color:var(--dim)">${t.closed_at?new Date(t.closed_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}):'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* ── trail A/B ── */
+async function loadShadow(){
+  const d = await api('/api/shadow'); if(!d) return;
+  const live = d.live || {}, shadows = d.shadows || [];
+  const allN = [live.n||0, ...shadows.map(s=>s.n||0)];
+  const matched = allN.length ? Math.min(...allN) : 0;
+  document.getElementById('abN').textContent = matched + ' / 50';
+  document.getElementById('abBar').style.width = Math.min(100, matched/50*100) + '%';
+  document.getElementById('abNeed').textContent = matched>=50 ? 'enough to decide' : ('need ~'+(50-matched)+' more');
+  document.getElementById('abFric').textContent = d.measured_friction_pct!=null ? d.measured_friction_pct.toFixed(2)+'%' : '—';
+  const fsub = document.getElementById('abFricSub');
+  if(d.friction_is_measured){
+    fsub.textContent = 'measured from '+(d.friction_n||0)+' live fills';
+    fsub.style.color = 'var(--gn)';
+  } else {
+    fsub.textContent = 'assumed — awaiting live fills';
+    fsub.style.color = 'var(--warn)';
+  }
+
+  // rows: live first, then shadows; highlight the best median net
+  const rows = [{trail_pct:live.trail_pct, type:'LIVE', ...live},
+                ...shadows.map(s=>({...s, type:'shadow'}))];
+  const meds = rows.map(r=>r.median_net_pct).filter(v=>v!=null);
+  const best = meds.length ? Math.max(...meds) : null;
+  const body = document.getElementById('abBody');
+  if(!rows.some(r=>r.n)){
+    body.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--mute);padding:28px">A/B begins on the first live entry</td></tr>';
+  } else {
+    body.innerHTML = rows.map(r=>{
+      const isBest = r.median_net_pct!=null && best!=null && Math.abs(r.median_net_pct-best)<1e-9;
+      const medCls = (r.median_net_pct||0)>=0?'up':'down';
+      const typeTag = r.type==='LIVE' ? '<span class="tag trail">LIVE</span>' : '<span class="tag dim">shadow</span>';
+      return `<tr style="${isBest?'background:rgba(212,168,67,0.07)':''}">
+        <td><b>${r.trail_pct!=null?r.trail_pct+'%':'—'}</b>${isBest?' <span class="tag" style="background:rgba(212,168,67,0.15);color:var(--gold)">best</span>':''}</td>
+        <td>${typeTag}</td>
+        <td>${r.n||0}</td>
+        <td class="${medCls}">${r.median_net_pct!=null?fmtPct(r.median_net_pct):'—'}</td>
+        <td>${r.win_rate!=null?r.win_rate.toFixed(0)+'%':'—'}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // verdict
+  const v = document.getElementById('abVerdict');
+  if(matched < 50){
+    v.textContent = 'Gathering data — decide the trail only after ~50 matched trades.';
+    v.style.color = 'var(--dim)';
+  } else {
+    const liveMed = live.median_net_pct;
+    const bestShadow = shadows.reduce((a,b)=>(b.median_net_pct||-1e9)>(a.median_net_pct||-1e9)?b:a, {median_net_pct:-1e9});
+    if(bestShadow.median_net_pct > (liveMed||0) + 0.05){
+      v.innerHTML = `Shadow ${bestShadow.trail_pct}% leads live ${live.trail_pct}% by ${fmtPct(bestShadow.median_net_pct-liveMed)} after friction — consider switching.`;
+      v.style.color = 'var(--gold)';
+    } else {
+      v.innerHTML = `Live ${live.trail_pct}% holds — no shadow beats it by a clear margin after friction.`;
+      v.style.color = 'var(--gn)';
+    }
+  }
+  document.getElementById('abNote').textContent = d.note || '';
+}
+
+/* ── universe (full tab) ── */
+function fmtVol(v){ if(v==null) return '—'; if(v>=1e9) return '$'+(v/1e9).toFixed(2)+'B'; if(v>=1e6) return '$'+(v/1e6).toFixed(1)+'M'; return '$'+(v/1e3).toFixed(0)+'K'; }
+const STATE_TAG = {active:'tag trail', hot:'tag', warming:'tag dim', dormant:'tag dim'};
+async function loadUniverse(){
+  const u = await api('/api/universe'); if(!u) return;
+  const coins = u.coins || [];
+  document.getElementById('uTotal').textContent = coins.length;
+  const evaluated = coins.some(c=>c.atr_pct!=null);
+  const incl = coins.filter(c=>c.include===true).length;
+  document.getElementById('uIncl').textContent = evaluated ? (incl+' / '+coins.length) : '—';
+  document.getElementById('uEval').textContent = u.universe_evaluated_at
+    ? new Date(u.universe_evaluated_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false})
+    : 'pending first run';
+  document.getElementById('uThresh').textContent =
+    `keep if ATR% ≥ ${u.min_atr_pct} and 24h vol ≥ ${fmtVol(u.min_vol_usd)}`;
+
+  const body = document.getElementById('uBody');
+  body.innerHTML = coins.map(c=>{
+    const stateTag = `<span class="${STATE_TAG[c.state]||'tag dim'}" ${c.state==='hot'?'style="background:rgba(212,168,67,0.15);color:var(--gold)"':''}>${c.state}</span>`;
+    let filter = '<span class="tag dim">—</span>';
+    if(c.include===true) filter = '<span class="tag" style="background:rgba(74,222,128,0.12);color:var(--gn)">✓ included</span>';
+    else if(c.include===false) filter = '<span class="tag" style="background:rgba(245,158,11,0.12);color:var(--warn)">✗ excluded</span>';
+    return `<tr>
+      <td><b>${c.coin}</b></td>
+      <td>${stateTag}</td>
+      <td>${c.atr_pct!=null?c.atr_pct.toFixed(2)+'%':'—'}</td>
+      <td>${fmtVol(c.day_vol_usd)}</td>
+      <td>${filter}</td>
+      <td style="color:var(--dim);text-align:left;white-space:normal">${(c.reasons&&c.reasons.length)?c.reasons.join('; '):'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
 /* ── load cycle ── */
-async function loadAll(){ await Promise.all([loadStatus(),loadStats(),loadEquity(),loadPulse()]); }
+async function loadAll(){ await Promise.all([loadStatus(),loadStats(),loadEquity(),loadPulse(),loadPositions(),loadTrades(),loadShadow(),loadUniverse()]); }
 loadAll(); setInterval(loadAll, 30000);
 </script>
 </body>

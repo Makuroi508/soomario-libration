@@ -110,6 +110,7 @@ def api_stats():
     fill_rate = (entries / signals_seen * 100) if signals_seen else None
 
     st = load_json(STATUS_FILE, default={}) or {}
+    fric_avg, fric_n = db.measured_friction()
     return jsonify({
         "ts": iso(),
         "equity": st.get("equity"),
@@ -121,6 +122,8 @@ def api_stats():
         "win_rate": round(wins / n * 100, 2) if n else None,
         "avg_net_pct": round(avg_net, 4),
         "realized_pnl": round(realized, 2),
+        "realized_friction_pct": fric_avg,
+        "friction_n": fric_n,
         "fill_rate": round(fill_rate, 2) if fill_rate is not None else None,
         "signals_seen": signals_seen,
         "misses": n_miss,
@@ -169,8 +172,14 @@ def api_universe():
             "atr_pct": m.get("atr_pct"),
             "day_vol_usd": m.get("day_vol_usd"),
             "include": m.get("include"),
+            "reasons": m.get("reasons", []),
         })
-    return jsonify({"ts": iso(), "coins": coins, "universe_evaluated_at": meta.get("ts")})
+    return jsonify({
+        "ts": iso(), "coins": coins,
+        "universe_evaluated_at": meta.get("ts"),
+        "min_atr_pct": config.MIN_ATR_PCT,
+        "min_vol_usd": config.MIN_DAILY_VOL_USD,
+    })
 
 
 @app.route("/api/shadow")
@@ -196,9 +205,13 @@ def api_shadow():
         shadows.append({"trail_pct": tp, "n": s["n"],
                         "median_net_pct": round(s["median_net_pct"], 4) if s["median_net_pct"] is not None else None,
                         "win_rate": s["win_rate"]})
+    fric_avg, fric_n = db.measured_friction()
+    is_meas = fric_avg is not None and fric_n >= 5
     return jsonify({
         "ts": iso(),
-        "measured_friction_pct": config.MEASURED_FRICTION_PCT,
+        "measured_friction_pct": fric_avg if is_meas else config.MEASURED_FRICTION_PCT,
+        "friction_is_measured": is_meas,
+        "friction_n": fric_n,
         "live": live,
         "shadows": shadows,
         "note": "Decide the trail only after ~50 matched trades; shadow exits are "

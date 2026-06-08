@@ -17,6 +17,7 @@ PAPER: there is no exchange, so manage() also detects a stop crossing and books
 the close itself, idealized at the stop level.
 """
 import logging
+from datetime import datetime
 
 import config
 from utils import iso, append_jsonl
@@ -104,39 +105,69 @@ class ExitManager:
             reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
             self.close_position(pos, fill_px=stop, reason=reason)
 
-    # ── booking a close (paper fill, or live reconcile) ────────
-    def close_position(self, pos: dict, fill_px: float, reason: str):
+    # ── booking a close (paper idealized, or live actual fill) ─
+    def close_position(self, pos: dict, fill_px: float, reason: str,
+                       fee: float = 0.0, intended_exit: float = None):
         is_long = pos["side"] == "long"
-        entry = pos["entry"]
+        entry = pos["entry"]            # actual entry fill
         qty = pos["qty"]
         move = (fill_px - entry) if is_long else (entry - fill_px)
         ret_pct = move / entry * 100 if entry else 0.0
         pnl = move * qty
+        fee_pct = (fee / (entry * qty) * 100) if (entry and qty) else 0.0
+        net_pct = ret_pct - fee_pct
+        net_pnl = pnl - (fee or 0.0)
 
-        # Realized PnL accrues to the flow-neutral baseline in BOTH modes, so the
-        # equity curve is driven purely by trade outcomes (not deposits/withdrawals).
-        # In live, exit_px is the stop estimate until userFills lands, after which
-        # it becomes the actual fill (net of slippage). See reconcile().
+        # Round-trip friction = the PLAN (signal entry -> intended stop, no fees)
+        # minus what ACTUALLY happened (real fills, net of fees). Positive = cost.
+        # Null in paper (idealized fills) so it never pollutes the measured number.
+        intended_entry = pos.get("intended_entry") or entry
+        i_exit = intended_exit if intended_exit is not None else fill_px
+        imove = (i_exit - intended_entry) if is_long else (intended_entry - i_exit)
+        intended_ret = imove / intended_entry * 100 if intended_entry else 0.0
+        friction_pct = None if config.PAPER else round(intended_ret - net_pct, 4)
+
+        # Realized PnL (net of fees) accrues to the flow-neutral baseline (both modes).
         acct = self.db.account()
-        self.db.set_account(equity=(acct["equity"] or 0.0) + pnl)
+        self.db.set_account(equity=(acct["equity"] or 0.0) + net_pnl)
 
-        # net_pct == ret_pct here; live realized friction is measured separately
-        # from actual fills (see note in reconcile()).
         self.db.book_trade(dict(
             coin=pos["coin"], side=pos["side"], entry=entry, exit=fill_px, qty=qty,
-            ret_pct=round(ret_pct, 4), net_pct=round(ret_pct, 4),
+            ret_pct=round(ret_pct, 4), net_pct=round(net_pct, 4),
+            friction_pct=friction_pct, fee=round(fee or 0.0, 6),
             exit_reason=reason, opened_at=pos.get("opened_at"), closed_at=iso(),
         ))
         self.db.delete_position(pos["coin"])
+        fr = "" if friction_pct is None else f" friction {friction_pct:+.2f}%"
         logger.info(f"    ◼ CLOSE {reason} {pos['coin']} @ ${fill_px:.6f} "
-                    f"({ret_pct:+.2f}%, pnl ${pnl:+.2f})")
+                    f"(net {net_pct:+.2f}%, pnl ${net_pnl:+.2f}{fr})")
+
+    def _resolve_exit_fill(self, pos):
+        """Return (avg_fill_px, total_fee) from the position's actual closing
+        fills, or None if none are found yet (caller falls back to the estimate)."""
+        try:
+            open_ms = int(datetime.fromisoformat(
+                str(pos["opened_at"]).replace("Z", "+00:00")).timestamp() * 1000) - 1000
+        except (ValueError, TypeError, KeyError):
+            open_ms = None
+        fills = self.client.get_user_fills(start_ms=open_ms)
+        coin = pos["coin"].upper()
+        closes = [f for f in fills
+                  if short_name(str(f.get("coin", ""))).upper() == coin
+                  and str(f.get("dir", "")).startswith("Close")]
+        tot_sz = sum(abs(float(f.get("sz", 0) or 0)) for f in closes)
+        if tot_sz <= 0:
+            return None
+        avg_px = sum(float(f["px"]) * abs(float(f["sz"])) for f in closes) / tot_sz
+        fee = sum(float(f.get("fee", 0) or 0) for f in closes)
+        return avg_px, fee
 
     # ── live reconcile — exchange is source of truth ───────────
     def reconcile(self):
         """LIVE: if a position is open in the DB but gone on the exchange, its
-        stop filled while we were not looking — book it. Booked at the stop
-        level as a best estimate; for exact realized friction the live trial
-        should hook the userFills endpoint (offered as a refinement)."""
+        stop filled out-of-band — book it at the ACTUAL fill from userFills so
+        realized friction (intended stop vs real fill) is measured, not guessed.
+        Falls back to the stop-level estimate if fills aren't indexed yet."""
         if config.PAPER:
             return
         try:
@@ -146,8 +177,15 @@ class ExitManager:
             return
         live_coins = {short_name(p.get("coin", p.get("symbol", ""))) for p in live}
         for pos in self.db.open_positions():
-            if pos["coin"].upper() not in live_coins:
-                stop = pos["trail_stop"] if pos["trail_stop"] is not None else pos["hard_stop"]
-                reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
-                logger.info(f"reconcile: {pos['coin']} gone on exchange — booking at ~${stop:.6f}")
-                self.close_position(pos, fill_px=stop, reason=reason)
+            if pos["coin"].upper() in live_coins:
+                continue
+            stop = pos["trail_stop"] if pos["trail_stop"] is not None else pos["hard_stop"]
+            reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
+            resolved = self._resolve_exit_fill(pos)
+            if resolved:
+                fill_px, fee = resolved
+                logger.info(f"reconcile: {pos['coin']} closed on exchange — actual fill ${fill_px:.6f}")
+                self.close_position(pos, fill_px=fill_px, reason=reason, fee=fee, intended_exit=stop)
+            else:
+                logger.info(f"reconcile: {pos['coin']} gone, fills not indexed yet — estimate ${stop:.6f}")
+                self.close_position(pos, fill_px=stop, reason=reason, intended_exit=stop)
