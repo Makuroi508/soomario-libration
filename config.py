@@ -42,7 +42,7 @@ SIGNAL_LOG = STATE_DIR / "signal_log.jsonl"
 STATUS_FILE = STATE_DIR / "status.json"   # worker writes each tick; API reads
 
 # ─── Hyperliquid credentials (reused names from Aphelion) ───────
-HL_ACCOUNT_ADDRESS = os.getenv("HL_ACCOUNT_ADDRESS", "").strip()
+HL_ACCOUNT_ADDRESS = (os.getenv("HL_ACCOUNT_ADDRESS") or os.getenv("HL_VAULT_ADDRESS") or "").strip()
 HL_PRIVATE_KEY     = os.getenv("HL_PRIVATE_KEY", "").strip()
 HL_IS_VAULT        = _b("HL_IS_VAULT")
 HL_API_URL         = "https://api.hyperliquid.xyz/info"
@@ -107,7 +107,7 @@ LOG_LEVEL      = os.getenv("LOG_LEVEL", "INFO")
 
 # Optional Telegram (no-ops if unset) — reused by utils.tg_notify
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CHAT_ID   = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHANNEL_ID") or "").strip()
 
 
 # ─── HL symbol / DEX helpers (swing universe is all main-perp) ──
