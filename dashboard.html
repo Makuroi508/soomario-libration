@@ -101,9 +101,9 @@ a{color:inherit;text-decoration:none}
 /* ── 60/40 split ── */
 .ov-grid{display:grid;grid-template-columns:1.5fr 1fr;gap:18px;align-items:start}
 .ov-left{min-width:0}
-.ov-right{position:sticky;top:80px}
+.ov-right{min-width:0}
 /* ── position cards (right column) ── */
-.poslist{display:flex;flex-direction:column;gap:9px;max-height:1180px;overflow-y:auto}
+.poslist{display:flex;flex-direction:column;gap:9px;max-height:none;overflow-y:auto}
 .pcard{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 12px;border-left-width:3px}
 .pcard.up{border-left-color:var(--gn)} .pcard.down{border-left-color:var(--rd)} .pcard.armed{border-left-color:var(--gold)}
 .pc-top{display:flex;align-items:center;gap:8px}
@@ -130,11 +130,11 @@ a{color:inherit;text-decoration:none}
 .kpi-tgt.hit{color:var(--gn)} .kpi-tgt.miss{color:var(--warn)}
 
 /* ── universe pulse ── */
-.pulse{display:grid;grid-template-columns:repeat(auto-fill,minmax(116px,1fr));gap:10px}
-.chip{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:11px 12px}
+.pulse{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:9px}
+.chip{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:9px 11px}
 .chip-coin{font-weight:600;letter-spacing:.06em;font-size:13px}
 .chip-state{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);margin-top:2px}
-.chip-bar{height:5px;border-radius:3px;margin-top:9px;background:rgba(123,94,167,0.18);overflow:hidden}
+.chip-bar{height:5px;border-radius:3px;margin-top:7px;background:rgba(123,94,167,0.18);overflow:hidden}
 .chip-bar i{display:block;height:100%;border-radius:3px;transition:width .4s ease}
 .chip[data-s="dormant"] .chip-bar i{width:14%;background:var(--mute)}
 .chip[data-s="warming"] .chip-bar i{width:55%;background:var(--gold-dim)}
@@ -144,7 +144,7 @@ a{color:inherit;text-decoration:none}
 .chip[data-s="active"] .chip-state{color:var(--cyan)}
 
 /* ── equity curve (EQUITY_CURVE_SPEC v1.2 §9) ── */
-.eq-wrap{position:relative;height:220px;margin:14px 0 8px;cursor:crosshair}
+.eq-wrap{position:relative;height:196px;margin:14px 0 8px;cursor:crosshair}
 .eq-wrap canvas{display:block;width:100%;height:100%}
 .eq-wrap.empty{border:1px dashed #2a2138;border-radius:6px;cursor:default}
 .eq-wrap.empty canvas,.eq-wrap.empty .eq-edge-label,.eq-wrap.empty .eq-cross,.eq-wrap.empty .eq-dot,.eq-wrap.empty .eq-tip{display:none!important}
@@ -216,7 +216,6 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
   </div>
   <div class="sn-links" id="navLinks">
     <a data-tab="overview" class="on">Overview</a>
-    <a data-tab="positions">Positions</a>
     <a data-tab="trades">Trades</a>
     <a data-tab="shadow">Trail A/B</a>
     <a data-tab="universe">Universe</a>
@@ -225,7 +224,6 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
 </nav>
 <div class="sn-mobile" id="snMobile">
   <a data-tab="overview" class="on">Overview</a>
-  <a data-tab="positions">Positions</a>
   <a data-tab="trades">Trades</a>
   <a data-tab="shadow">Trail A/B</a>
   <a data-tab="universe">Universe</a>
@@ -281,7 +279,7 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
       </div>
     </div>
 
-    <!-- 60 / 40 split -->
+    <!-- equity curve (60) + open positions (40) -->
     <div class="ov-grid">
       <div class="ov-left">
         <!-- equity curve -->
@@ -315,60 +313,41 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
             <span><span class="ad" style="background:#F87171"></span>Hard stop</span>
           </div>
         </div>
-
-        <!-- validation KPIs -->
-        <div class="crd">
-          <div class="crd-h">Live Validation <span class="crd-sub">the Phase-1 go/no-go numbers</span></div>
-          <div class="kpis">
-            <div class="kpi"><div class="kpi-label">Net %/Trade</div>
-              <div class="kpi-val" id="kNet">—</div><div class="kpi-tgt" id="kNetT">target &gt; +0.5%</div></div>
-            <div class="kpi"><div class="kpi-label">Win Rate</div>
-              <div class="kpi-val" id="kWin">—</div><div class="kpi-tgt" id="kWinT">target ~65%</div></div>
-            <div class="kpi"><div class="kpi-label">Fill Rate</div>
-              <div class="kpi-val" id="kFill">—</div><div class="kpi-tgt" id="kFillT">target ~85%</div></div>
-            <div class="kpi"><div class="kpi-label">Realized Friction</div>
-              <div class="kpi-val" id="kFric">—</div><div class="kpi-tgt" id="kFricT">awaiting live fills</div></div>
-          </div>
-        </div>
-
-        <!-- universe pulse -->
-        <div class="crd">
-          <div class="crd-h">Universe Pulse <span class="crd-sub">how close each coin is to a trade</span></div>
-          <div class="pulse" id="pulse"><div class="placeholder">warming up…</div></div>
-        </div>
       </div>
 
       <!-- right: live open positions -->
       <div class="ov-right">
-        <div class="crd" style="padding:14px">
+        <div class="crd" style="padding:14px;height:100%">
           <div class="crd-h">Open Positions <span class="crd-tag live">LIVE</span>
             <span class="crd-sub" id="opCount">—</span></div>
           <div class="poslist" id="ovPos"><div class="placeholder">no open positions</div></div>
         </div>
       </div>
     </div>
-  </section>
 
-
-  <section class="tab" id="tab-positions">
-    <div class="tbl-head">
-      <div class="tbl-stat"><div class="l">Open</div><div class="v" id="pOpen">—</div></div>
-      <div class="tbl-stat"><div class="l">Notional Deployed</div><div class="v" id="pNotional">—</div></div>
-      <div class="tbl-stat"><div class="l">Free Margin</div><div class="v" id="pFree">—</div></div>
-      <div class="tbl-stat"><div class="l">Aggregate uPnL</div><div class="v" id="pUpnl">—</div></div>
+    <!-- universe pulse (full width) -->
+    <div class="crd">
+      <div class="crd-h">Universe Pulse <span class="crd-sub">how close each coin is to a trade</span></div>
+      <div class="pulse" id="pulse"><div class="placeholder">warming up…</div></div>
     </div>
-    <div class="crd" style="padding:0;overflow:hidden">
-      <div class="tblwrap">
-        <table class="dt">
-          <thead><tr>
-            <th>Coin</th><th>Side</th><th>Entry</th><th>Mark</th><th>uPnL</th><th>Move%</th>
-            <th>Notional</th><th>Peak</th><th>Stop</th><th>Dist→Stop</th><th>Trail</th><th>Age</th>
-          </tr></thead>
-          <tbody id="posBody"><tr><td colspan="12" style="text-align:center;color:var(--mute);padding:28px">no open positions</td></tr></tbody>
-        </table>
+
+    <!-- live validation (full width, bottom) -->
+    <div class="crd">
+      <div class="crd-h">Live Validation <span class="crd-sub">the Phase-1 go/no-go numbers</span></div>
+      <div class="kpis">
+        <div class="kpi"><div class="kpi-label">Net %/Trade</div>
+          <div class="kpi-val" id="kNet">—</div><div class="kpi-tgt" id="kNetT">target &gt; +0.5%</div></div>
+        <div class="kpi"><div class="kpi-label">Win Rate</div>
+          <div class="kpi-val" id="kWin">—</div><div class="kpi-tgt" id="kWinT">target ~65%</div></div>
+        <div class="kpi"><div class="kpi-label">Fill Rate</div>
+          <div class="kpi-val" id="kFill">—</div><div class="kpi-tgt" id="kFillT">target ~85%</div></div>
+        <div class="kpi"><div class="kpi-label">Realized Friction</div>
+          <div class="kpi-val" id="kFric">—</div><div class="kpi-tgt" id="kFricT">awaiting live fills</div></div>
       </div>
     </div>
   </section>
+
+
   <section class="tab" id="tab-trades">
     <div class="tbl-head">
       <div class="tbl-stat"><div class="l">Closed Trades</div><div class="v" id="tN">—</div></div>
@@ -658,49 +637,6 @@ function fmtAge(iso){
   if(h>=24){ const d=Math.floor(h/24); return d+'d '+(h%24)+'h'; }
   return h>0 ? h+'h '+m+'m' : m+'m';
 }
-async function loadPositions(){
-  const s = await api('/api/status'); if(!s) return;
-  const ps = s.positions || [];
-  document.getElementById('pOpen').textContent = ps.length + ' / ' + (s.max_concurrent||10);
-  const totNot = ps.reduce((a,p)=>a+(p.notional||0),0);
-  const totMar = ps.reduce((a,p)=>a+(p.margin||0),0);
-  const totUp  = ps.reduce((a,p)=>a+(p.upnl||0),0);
-  document.getElementById('pNotional').textContent = fmt$(totNot);
-  const free = document.getElementById('pFree');
-  free.textContent = (s.equity!=null) ? fmt$(s.equity - totMar) : '—';
-  const up = document.getElementById('pUpnl'); up.textContent = fmt$(totUp);
-  up.className = 'v ' + (totUp>=0?'up':'down');
-
-  const body = document.getElementById('posBody');
-  if(!ps.length){ body.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--mute);padding:28px">no open positions</td></tr>'; return; }
-  body.innerHTML = ps.map(p=>{
-    const isLong = p.side==='long';
-    const mark = p.mark, move = (mark!=null && p.entry) ? ((isLong? mark-p.entry : p.entry-mark)/p.entry*100) : null;
-    // distance to stop as % of mark (cushion remaining before the stop fills)
-    let dist=null;
-    if(mark!=null && p.stop!=null) dist = (isLong ? (mark-p.stop)/mark : (p.stop-mark)/mark)*100;
-    const distPctClamp = dist!=null ? Math.max(0,Math.min(100, dist/10*100)) : 0; // 10% hard stop = full bar
-    const near = dist!=null && dist < 2;
-    const trailTag = p.trail_active ? '<span class="tag trail">TRAIL</span>'
-                                    : '<span class="tag hard">HARD</span>';
-    const upCls = (p.upnl||0)>=0?'up':'down', mvCls = (move||0)>=0?'up':'down';
-    return `<tr>
-      <td><b>${p.coin}</b></td>
-      <td><span class="side ${p.side}">${p.side.toUpperCase()}</span></td>
-      <td>${p.entry!=null?'$'+p.entry.toFixed(4):'—'}</td>
-      <td>${mark!=null?'$'+mark.toFixed(4):'—'}</td>
-      <td class="${upCls}">${p.upnl!=null?fmt$(p.upnl):'—'}</td>
-      <td class="${mvCls}">${move!=null?fmtPct(move):'—'}</td>
-      <td>${fmt$(p.notional)}</td>
-      <td>${p.peak!=null?'$'+p.peak.toFixed(4):'—'}</td>
-      <td>${p.stop!=null?'$'+p.stop.toFixed(4):'—'} ${trailTag}</td>
-      <td>${dist!=null?dist.toFixed(2)+'%':'—'}<span class="dist-bar"><i class="${near?'near':''}" style="width:${distPctClamp}%"></i></span></td>
-      <td>${p.trail_active?'<span class="tag trail">armed</span>':'<span class="tag dim">building</span>'}</td>
-      <td style="color:var(--dim)">${fmtAge(p.opened_at)}</td>
-    </tr>`;
-  }).join('');
-}
-
 /* ── trades ── */
 function fmtSpan(a,b){
   if(!a||!b) return '—';
@@ -852,7 +788,7 @@ async function loadUniverse(){
 }
 
 /* ── load cycle ── */
-async function loadAll(){ await Promise.all([loadStatus(),loadStats(),loadEquity(),loadPulse(),loadPositions(),loadTrades(),loadShadow(),loadUniverse()]); }
+async function loadAll(){ await Promise.all([loadStatus(),loadStats(),loadEquity(),loadPulse(),loadTrades(),loadShadow(),loadUniverse()]); }
 loadAll(); setInterval(loadAll, 30000);
 </script>
 </body>
