@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
 """
 
 
+_DB_READY_LOGGED = False
+
+
 class DB:
     def __init__(self, path=None):
         self.path = str(path or DB_PATH)
@@ -74,7 +77,10 @@ class DB:
                 "VALUES (1, 0, 0, 0, ?)", (utc_date_str(),)
             )
             self._conn.commit()
-        logger.info(f"🗄️  DB ready at {self.path}")
+        global _DB_READY_LOGGED
+        if not _DB_READY_LOGGED:
+            logger.info(f"🗄️  DB ready at {self.path}")
+            _DB_READY_LOGGED = True
 
     def _migrate(self):
         """Add columns introduced after first deploy (idempotent)."""
