@@ -113,9 +113,12 @@ class ExitManager:
         ret_pct = move / entry * 100 if entry else 0.0
         pnl = move * qty
 
-        if config.PAPER:
-            acct = self.db.account()
-            self.db.set_account(equity=(acct["equity"] or 0.0) + pnl)
+        # Realized PnL accrues to the flow-neutral baseline in BOTH modes, so the
+        # equity curve is driven purely by trade outcomes (not deposits/withdrawals).
+        # In live, exit_px is the stop estimate until userFills lands, after which
+        # it becomes the actual fill (net of slippage). See reconcile().
+        acct = self.db.account()
+        self.db.set_account(equity=(acct["equity"] or 0.0) + pnl)
 
         # net_pct == ret_pct here; live realized friction is measured separately
         # from actual fills (see note in reconcile()).

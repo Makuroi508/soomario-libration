@@ -129,6 +129,50 @@ def api_stats():
     })
 
 
+@app.route("/api/universe")
+def api_universe():
+    """Per-coin pulse: a COARSE 3-state heat (dormant / warming / hot) computed
+    server-side from RSI proximity to a trigger boundary. The raw RSI never
+    leaves the server, and no direction is shown — 'hot' spans enough range that
+    it can't be cleanly front-run. Coins with an open position show 'active'.
+    ATR%/volume/include are merged from universe.json when the worker has written
+    it (Universe tab); absent on a fresh deploy."""
+    HOT_BAND, WARM_BAND = 1.5, 3.0  # RSI points to a boundary (presentation tuning)
+
+    def heat(rsi):
+        if rsi is None:
+            return "dormant"
+        # distance below 50 (long brewing) or above 40 (short brewing)
+        for d in (config.LONG_LEVEL - rsi, rsi - config.SHORT_LEVEL):
+            if 0 < d <= HOT_BAND:
+                return "hot"
+        for d in (config.LONG_LEVEL - rsi, rsi - config.SHORT_LEVEL):
+            if 0 < d <= WARM_BAND:
+                return "warming"
+        return "dormant"
+
+    db = _db()
+    rsi_map = {r["coin"]: r["last_rsi"] for r in db.all_rsi_state()}
+    active = {p["coin"] for p in db.open_positions()}
+    from config import STATE_DIR
+    meta = load_json(STATE_DIR / "universe.json", default={}) or {}
+    meta_map = {m["coin"]: m for m in meta.get("report", [])}
+
+    coins = []
+    for c in config.COINS:
+        sym = c.upper()
+        m = meta_map.get(sym, {})
+        coins.append({
+            "coin": sym,
+            "state": "active" if sym in active else heat(rsi_map.get(sym)),
+            "in_position": sym in active,
+            "atr_pct": m.get("atr_pct"),
+            "day_vol_usd": m.get("day_vol_usd"),
+            "include": m.get("include"),
+        })
+    return jsonify({"ts": iso(), "coins": coins, "universe_evaluated_at": meta.get("ts")})
+
+
 @app.route("/api/shadow")
 def api_shadow():
     """Live TRAIL_PCT vs shadow trails — median net %/trade after measured friction.

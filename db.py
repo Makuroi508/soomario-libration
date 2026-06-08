@@ -183,6 +183,9 @@ class DB:
         )
         self._conn.commit()
 
+    def all_rsi_state(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute("SELECT * FROM rsi_state").fetchall()]
+
     # ── shadow trail A/B (counterfactual; never trades) ────────
     def open_shadow(self, coin, trail_pct, side, entry, qty, hard_stop, opened_at):
         self._conn.execute(

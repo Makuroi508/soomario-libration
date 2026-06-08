@@ -29,30 +29,33 @@ class PositionManager:
         self.db = db
         self.max_concurrent = config.MAX_CONCURRENT
 
-    # ── seeding (paper only) ───────────────────────────────────
+    # ── baseline + perf-equity (flow-neutral) ──────────────────
     def ensure_seeded(self):
-        """In paper mode, seed the account equity once so sizing has a base."""
-        if not config.PAPER:
-            return
+        """Public hook called at startup. Captures the starting baseline once."""
+        self._ensure_baseline()
+
+    def _ensure_baseline(self):
+        """Seed account.equity with starting capital ONCE. After this, account.equity
+        moves only by realized PnL (booked on close) — never re-read from the
+        exchange — so deposits/withdrawals can't move the curve. PAPER seeds
+        PAPER_START_EQUITY; LIVE captures the wallet value at go-live."""
         acct = self.db.account()
-        if not acct["equity"] or acct["equity"] <= 0:
-            self.db.set_account(
-                equity=config.PAPER_START_EQUITY,
-                daily_baseline=config.PAPER_START_EQUITY,
-                daily_halt=0, last_reset=utc_date_str(),
-            )
-            logger.info(f"📓 paper equity seeded at ${config.PAPER_START_EQUITY:.2f}")
+        if acct["equity"] and acct["equity"] > 0:
+            return
+        base = config.PAPER_START_EQUITY if config.PAPER else (self.client.get_equity() or 0.0)
+        if base > 0:
+            self.db.set_account(equity=base, daily_baseline=base, daily_halt=0,
+                                last_reset=utc_date_str())
+            tag = "paper" if config.PAPER else "live starting capital"
+            logger.info(f"📓 baseline captured: ${base:.2f} ({tag})")
 
-    # ── equity (source of truth per tick) ──────────────────────
     def equity(self) -> float:
-        """LIVE/DRY_RUN: exchange mark-to-market. PAPER: realized cash + unrealized
-        of open positions valued at live prices."""
-        if config.PAPER:
-            return self._paper_equity()
-        eq = self.client.get_equity()
-        return float(eq) if eq and eq > 0 else 0.0
-
-    def _paper_equity(self) -> float:
+        """Flow-neutral performance equity = baseline + cumulative realized PnL
+        (account.equity) + open unrealized PnL at live marks. This is what the
+        curve plots and what sizing/DD use; it ignores deposits/withdrawals by
+        construction. During the own-account trial it equals wallet value (no
+        flows); it stays correct once Libration is wrapped as a vault."""
+        self._ensure_baseline()
         realized = self.db.account()["equity"] or 0.0
         upnl = 0.0
         for p in self.db.open_positions():
