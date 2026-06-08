@@ -81,9 +81,47 @@ class ExitManager:
             pos = {**pos, **updates}
             self.db.update_position(coin, **updates)
 
-        # PAPER: no exchange to fill the stop, so detect the crossing here.
+        # Stop enforcement. PAPER: no exchange, so detect the crossing here and
+        # book at the stop. LIVE: the resting trigger should fill, but if price
+        # has crossed the stop and we're STILL open (trigger missing/failed/
+        # gapped), force a reduce-only market close — the safety net.
         if config.PAPER:
             self._paper_check_stop(pos, price)
+        else:
+            self._live_stop_backstop(pos, price)
+
+    def _live_stop_backstop(self, pos, price):
+        """LIVE safety net: never let a position survive past its stop just
+        because the resting trigger order isn't on the book. If price has
+        crossed the effective stop and the position is still open, force a
+        reduce-only market close now and book it. Reduce-only means it can
+        never flip into a new position, and if the resting trigger already
+        filled it's a harmless no-op."""
+        is_long = pos["side"] == "long"
+        stop = pos["trail_stop"] if pos["trail_stop"] is not None else pos["hard_stop"]
+        if stop is None:
+            return
+        crossed = (price <= stop) if is_long else (price >= stop)
+        if not crossed:
+            return
+        reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
+        logger.warning(f"🛟 {pos['coin']} ${price:.6f} crossed stop ${stop:.6f} but still open "
+                       f"— forcing reduce-only market close (resting trigger missing/failed)")
+        tg_notify(f"⚠️ SAFETY CLOSE {pos['coin']} — price ${price:.4f} crossed stop "
+                  f"${stop:.4f} with no working trigger; forcing market close.", level="warn")
+        res = self.client.market_close(pos["coin"], pos["qty"], is_long, current_price=price)
+        if res and res.get("filled"):
+            sid = pos.get("hard_stop_id")
+            if sid is not None and str(sid).isdigit():
+                try:
+                    self.client.cancel_order(pos["coin"], int(sid))   # clear any stale trigger
+                except (TypeError, ValueError):
+                    pass
+            fill = res.get("avg_price") or stop
+            self.close_position(pos, fill_px=fill, reason=reason, intended_exit=stop)
+        else:
+            logger.error(f"❌ {pos['coin']} safety market_close did not confirm a fill: {res} "
+                         f"— will retry next tick. SET A MANUAL STOP if this persists.")
 
     def _move_stop(self, pos, qty, new_stop, updates):
         new_stop = round(new_stop, 8)

@@ -14,6 +14,7 @@ for the live snapshot, the JSONL logs for the curve, and a separate read-only
 SQLite handle (WAL) for closed-trade KPIs.
 """
 import logging
+import threading
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -25,22 +26,25 @@ from utils import tail_jsonl, load_json, iso
 logger = logging.getLogger("api")
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
 
-_DB = None
+# One SQLite connection PER THREAD. Flask serves requests on multiple threads;
+# a single shared connection executed concurrently raises "bad parameter or
+# other API misuse" (and knock-on IndexErrors). WAL lets these per-thread
+# read handles coexist with the worker's writer handle.
+_tls = threading.local()
 
 
 def attach_state(db=None):
-    """Called by the worker at startup. The API keeps its own read handle, so
-    this is only a liveness marker — we don't share the worker's connection
-    across threads."""
+    """Liveness marker only — the API never shares the worker's connection."""
     logger.info("api: worker attached")
 
 
 def _db():
-    global _DB
-    if _DB is None:
+    db = getattr(_tls, "db", None)
+    if db is None:
         from db import DB
-        _DB = DB()  # own connection (WAL) for concurrent reads
-    return _DB
+        db = DB()  # this thread's own WAL connection for concurrent reads
+        _tls.db = db
+    return db
 
 
 @app.after_request
