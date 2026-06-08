@@ -162,8 +162,12 @@ def tick(hl, db, pm, em, shadow):
     pm.maybe_reset_daily()
     now_ms = int(__import__("time").time() * 1000)
 
-    # one cheap price poll for trailing + marks
-    marks = hl.get_all_prices() or {}
+    # one cheap price poll for trailing + marks. Include any open-position coin
+    # that's no longer in COINS (dropped from the tracked set after the position
+    # was opened) so it still gets a live mark — and therefore still gets
+    # trailed, backstopped, and marked on the dashboard until it exits.
+    open_coins = [p["coin"] for p in db.open_positions()]
+    marks = hl.get_all_prices(extra=open_coins) or {}
 
     # ── entries: evaluate the RSI cross only on a freshly closed 4h bar ──
     for coin in config.COINS:
