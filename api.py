@@ -26,11 +26,14 @@ from utils import tail_jsonl, load_json, iso
 logger = logging.getLogger("api")
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
 
-# One SQLite connection PER THREAD. Flask serves requests on multiple threads;
-# a single shared connection executed concurrently raises "bad parameter or
-# other API misuse" (and knock-on IndexErrors). WAL lets these per-thread
-# read handles coexist with the worker's writer handle.
-_tls = threading.local()
+# One shared read connection for the API, serialized by a lock. The worker owns
+# its own separate connection for writes (WAL lets them coexist). Flask serves
+# requests on per-request threads; rather than open a new SQLite connection for
+# every request (churny, and noisy in the logs), all API reads share one handle
+# and a lock holds for the duration of each request so no two threads execute on
+# it at once. Low-traffic dashboard reads make the lock essentially free.
+_DB = None
+_DB_LOCK = threading.RLock()
 
 
 def attach_state(db=None):
@@ -39,12 +42,24 @@ def attach_state(db=None):
 
 
 def _db():
-    db = getattr(_tls, "db", None)
-    if db is None:
+    global _DB
+    if _DB is None:
         from db import DB
-        db = DB()  # this thread's own WAL connection for concurrent reads
-        _tls.db = db
-    return db
+        _DB = DB()
+    return _DB
+
+
+@app.before_request
+def _acquire_db():
+    _DB_LOCK.acquire()
+
+
+@app.teardown_request
+def _release_db(exc=None):
+    try:
+        _DB_LOCK.release()
+    except RuntimeError:
+        pass  # lock wasn't held (e.g. before_request never ran) — ignore
 
 
 @app.after_request
