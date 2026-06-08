@@ -38,7 +38,7 @@ try:
     from config import POLL_SECONDS, DASHBOARD_PORT, summary as config_summary
     print("[boot] config OK", flush=True)
 
-    from hl_client import HLClient
+    from hl_client import HLClient, build_asset_meta
     from db import DB
     from position_manager import PositionManager
     from exit_manager import ExitManager
@@ -66,7 +66,7 @@ def _write_status(db, pm, equity, total_upnl, marks):
         eff_stop = p["trail_stop"] if p["trail_stop"] is not None else p["hard_stop"]
         positions.append({
             "coin": p["coin"], "side": p["side"], "entry": p["entry"], "qty": p["qty"],
-            "notional": p["notional"], "mark": mark, "upnl": upnl,
+            "notional": p["notional"], "margin": p["margin"], "mark": mark, "upnl": upnl,
             "peak": p["peak"], "stop": eff_stop, "hard_stop": p["hard_stop"],
             "trail_active": bool(p["trail_active"]), "opened_at": p["opened_at"],
         })
@@ -85,6 +85,20 @@ def _write_status(db, pm, equity, total_upnl, marks):
     })
 
 
+def _universe_refresh(hl):
+    """Evaluate ATR%/liquidity and write universe.json for the Universe tab.
+    Informational by default; only narrows the live set if UNIVERSE_AUTOFILTER=1."""
+    try:
+        inc, rep = universe.evaluate(hl)
+        universe.log_report(rep)
+        save_json(config.STATE_DIR / "universe.json", {"ts": iso(), "report": rep})
+        if config.UNIVERSE_AUTOFILTER and inc:
+            config.COINS = [c for c in config.COINS if c in inc]
+            logger.info(f"universe autofilter ON -> trading {config.COINS}")
+    except Exception as e:
+        logger.warning(f"universe eval skipped: {e}")
+
+
 def run_worker():
     time.sleep(3)  # let Flask bind first
     logger.info("═" * 60)
@@ -96,7 +110,8 @@ def run_worker():
         if not hl.init_sdk():
             logger.error("🛑 HL SDK init failed — worker will not start. Fix creds and redeploy.")
             return
-        hl.build_asset_meta()
+        hl.asset_meta = build_asset_meta()
+        logger.info(f"📐 asset_meta loaded for {len(hl.asset_meta)} symbols")
     db = DB()
     pm = PositionManager(hl, db)
     em = ExitManager(hl, db, pm)
@@ -104,23 +119,20 @@ def run_worker():
     pm.ensure_seeded()
     attach_state(db)  # let the API read from this DB handle's file
 
-    # Universe report (informational). Off by default; only filters if asked.
-    try:
-        inc, rep = universe.evaluate(hl)
-        universe.log_report(rep)
-        if config.UNIVERSE_AUTOFILTER and inc:
-            config.COINS = [c for c in config.COINS if c in inc]
-            logger.info(f"universe autofilter ON -> trading {config.COINS}")
-    except Exception as e:
-        logger.warning(f"universe eval skipped: {e}")
+    # Universe evaluation (informational). Off by default; only filters if asked.
+    _universe_refresh(hl)
 
     tg_notify(f"Libration worker STARTED — equity ${pm.equity():.2f}, "
               f"{len(config.COINS)} coins, mode {config_summary()['mode']}", level="info")
 
+    last_uni = time.time()
     while True:
         try:
             t0 = time.time()
             tick(hl, db, pm, em, shadow)
+            if time.time() - last_uni > 3600:   # refresh universe hourly
+                _universe_refresh(hl)
+                last_uni = time.time()
             time.sleep(max(1.0, POLL_SECONDS - (time.time() - t0)))
         except KeyboardInterrupt:
             logger.info("🛑 worker interrupted"); break
