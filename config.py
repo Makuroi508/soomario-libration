@@ -72,8 +72,10 @@ SHADOW_TRAILS = [float(x) for x in os.getenv("SHADOW_TRAILS", "0.3,0.4").split("
 MEASURED_FRICTION_PCT = _f("MEASURED_FRICTION_PCT", 0.5)
 
 # ─── Universe filter (universe.py) ──────────────────────────────
+# HL alt volumes run far lower than CEXes; this is a thin-dust sanity floor,
+# NOT the real selector. Inclusion is decided by the per-coin backtest edge.
 MIN_ATR_PCT       = _f("MIN_ATR_PCT", 3.0)            # avg daily TR% floor (volatile alts only)
-MIN_DAILY_VOL_USD = _f("MIN_DAILY_VOL_USD", 10_000_000)
+MIN_DAILY_VOL_USD = _f("MIN_DAILY_VOL_USD", 2_000_000)
 UNIVERSE_AUTOFILTER = _b("UNIVERSE_AUTOFILTER")       # off: log report only, never silently drop
 
 # ─── Frozen strategy params (walk-forward validated) ────────────
