@@ -125,6 +125,9 @@ class PositionManager:
             if stop_id is None:
                 # Filled but unprotected — flatten immediately rather than ride naked.
                 logger.error(f"❌ {coin}: stop placement failed after fill — flattening")
+                tg_notify(f"⚠️ {coin}: STOP FAILED to place after entry fill — "
+                          f"flattening the position immediately (not riding unprotected).",
+                          level="warn")
                 self.client.market_close(coin, qty, is_long, current_price=price)
                 self.db.log_miss(coin, signal, "stop_failed_flattened"); return None
 
