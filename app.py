@@ -177,6 +177,15 @@ def tick(hl, db, pm, em, shadow):
             closes = [c["c"] for c in closed]
             rsi = signals.wilder_rsi(closes, config.RSI_LEN)
             db.set_rsi_state(coin, last_ts, rsi[-1])
+            if seen is None:
+                # Cold start: prime state but do NOT trade a cross that completed
+                # before we were watching — its close price is stale (the bar may
+                # have closed up to ~4h ago, and we'd enter at the current, often
+                # run-up price). Trade only crosses observed live, so entries match
+                # the backtest's close fills. After this, state persists on the
+                # volume so reboots don't re-prime.
+                logger.info(f"    · primed {coin} — no cold-start entry on pre-existing bar")
+                continue
             if not signals.new_closed_bar(seen, last_ts):
                 continue  # already evaluated this bar — no double-fire
             sig = signals.entry_signal(rsi[-2], rsi[-1], config.LONG_LEVEL, config.SHORT_LEVEL)
