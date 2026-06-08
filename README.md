@@ -192,6 +192,27 @@ API: `/api/status`, `/api/positions`, `/api/trades`, `/api/stats`, `/api/shadow`
 
 ---
 
+## Watch list (reduced sizing for unproven names)
+
+Not every coin earns full size on day one. `WATCH` is a second list of fragile or
+short-history names that still trade live, but at `WATCH_SIZE_MULT` of normal notional
+(default 0.5×) — so a wrong call on one costs half. They're added to the traded universe
+alongside `COINS`; the only difference is size.
+
+```
+COINS=DOT,WLD,LINK,TAO,JTO,HYPE,kPEPE,SUI,SOL,NEAR,ADA,ENA,BCH,AVAX,ZEC
+WATCH=ATOM,XMR,AAVE,ONDO,FARTCOIN,PENGU
+WATCH_SIZE_MULT=0.5
+```
+
+The asymmetry is the point: you can always promote a coin to full size once live fills
+confirm the edge (move it from `WATCH` to `COINS`), but you can't un-take the losses from
+launching a bad one at full weight. Use the realized-per-trade tracking and `shadow.py` to
+decide promotions on evidence, not backtest optimism. Reduced positions are flagged `½×`
+on the dashboard (position cards and the Universe tab).
+
+---
+
 ## How realized friction is measured
 
 When a stop fills on the exchange, `reconcile()` reads the **actual fill** from Hyperliquid's

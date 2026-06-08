@@ -70,6 +70,7 @@ def _write_status(db, pm, equity, total_upnl, marks):
             "notional": p["notional"], "margin": p["margin"], "mark": mark, "upnl": upnl,
             "peak": p["peak"], "stop": eff_stop, "hard_stop": p["hard_stop"],
             "trail_active": bool(p["trail_active"]), "opened_at": p["opened_at"],
+            "reduced": p["coin"].upper() in config.WATCH_SET,
         })
     acct = db.account()
     inception = acct.get("inception") or acct.get("daily_baseline") or equity or 0.0

@@ -503,6 +503,7 @@ function renderOverviewPositions(ps){
     const cls=p.trail_active?'armed':(up>=0?'up':'down');
     const badge=p.trail_active?'<span class="pbadge armed">armed</span>'
       :(up>=0?'<span class="pbadge up">'+p.side.toUpperCase()+'</span>':'<span class="pbadge down">'+p.side.toUpperCase()+'</span>');
+    const watchBadge = p.reduced ? '<span class="pbadge" style="background:rgba(123,94,167,0.22);color:var(--purp2)" title="WATCH — reduced size">½×</span>' : '';
     // cushion bar: how far mark sits between the stop (0%) and the peak (100%)
     let fill=0, near=false;
     if(mark!=null&&p.stop!=null&&p.peak!=null){
@@ -515,7 +516,7 @@ function renderOverviewPositions(ps){
       : `building · arms at +${0.55}% · stop $${fmtNum(p.stop)}`;
     return `<div class="pcard ${cls}">
       <div class="pc-top">
-        <span class="pc-coin">${p.coin}</span> ${badge}
+        <span class="pc-coin">${p.coin}</span> ${badge}${watchBadge}
         <span class="pc-px">avg $${fmtNum(p.entry)} → <b>$${fmtNum(mark)}</b></span>
         <span class="pc-pnl ${up>=0?'up':'down'}">${fmt$(up)}<small>${move!=null?fmtPct(move):''}</small></span>
       </div>
@@ -840,7 +841,7 @@ async function loadUniverse(){
     if(c.include===true) filter = '<span class="tag" style="background:rgba(74,222,128,0.12);color:var(--gn)">✓ included</span>';
     else if(c.include===false) filter = '<span class="tag" style="background:rgba(245,158,11,0.12);color:var(--warn)">✗ excluded</span>';
     return `<tr>
-      <td><b>${c.coin}</b></td>
+      <td><b>${c.coin}</b>${c.watch?' <span class="tag" style="background:rgba(123,94,167,0.22);color:var(--purp2)">watch ½×</span>':''}</td>
       <td>${stateTag}</td>
       <td>${c.atr_pct!=null?c.atr_pct.toFixed(2)+'%':'—'}</td>
       <td>${fmtVol(c.day_vol_usd)}</td>

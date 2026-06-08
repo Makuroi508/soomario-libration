@@ -96,7 +96,19 @@ MAX_CONCURRENT = int(LEVERAGE / NOTIONAL_FRAC + 1e-9)
 
 # ─── Universe (volatile alt perps; main DEX only — no HIP-3) ────
 _DEFAULT_COINS = "SOL,AVAX,LINK,NEAR,ADA,DOGE,BCH,LTC,DOT,ATOM"
-COINS = [c.strip().upper() for c in os.getenv("COINS", _DEFAULT_COINS).split(",") if c.strip()]
+_CORE_COINS = [c.strip().upper() for c in os.getenv("COINS", _DEFAULT_COINS).split(",") if c.strip()]
+
+# WATCH: fragile / unproven names that still trade live, but at a reduced size so a
+# wrong call costs less. They earn full size by proving themselves on real fills
+# (shadow.py + realized-per-trade tracking). The traded universe is core ∪ watch.
+WATCH_SET = set(c.strip().upper() for c in os.getenv("WATCH", "").split(",") if c.strip())
+WATCH_SIZE_MULT = _f("WATCH_SIZE_MULT", 0.5)         # notional multiplier for WATCH coins
+COINS = _CORE_COINS + [w for w in WATCH_SET if w not in _CORE_COINS]
+
+
+def size_mult(coin: str) -> float:
+    """Per-coin notional multiplier: WATCH coins trade reduced, everything else 1.0."""
+    return WATCH_SIZE_MULT if coin.upper() in WATCH_SET else 1.0
 
 # ─── Timing ─────────────────────────────────────────────────────
 POLL_SECONDS           = _i("POLL_SECONDS", 120)    # trailing-manage + price poll cadence
@@ -156,6 +168,8 @@ def summary() -> dict:
     return {
         "name": NAME,
         "coins": COINS,
+        "watch": sorted(WATCH_SET),
+        "watch_size_mult": WATCH_SIZE_MULT,
         "leverage": LEVERAGE,
         "notional_frac": NOTIONAL_FRAC,
         "max_concurrent": MAX_CONCURRENT,

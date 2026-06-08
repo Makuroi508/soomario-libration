@@ -173,6 +173,7 @@ def api_universe():
             "day_vol_usd": m.get("day_vol_usd"),
             "include": m.get("include"),
             "reasons": m.get("reasons", []),
+            "watch": sym in config.WATCH_SET,
         })
     return jsonify({
         "ts": iso(), "coins": coins,

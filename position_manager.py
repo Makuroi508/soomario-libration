@@ -45,7 +45,7 @@ class PositionManager:
         base = config.PAPER_START_EQUITY if config.PAPER else (self.client.get_equity() or 0.0)
         if base > 0:
             self.db.set_account(equity=base, daily_baseline=base, daily_halt=0,
-                                last_reset=utc_date_str())
+                                last_reset=utc_date_str(), inception=base, inception_ts=iso())
             tag = "paper" if config.PAPER else "live starting capital"
             logger.info(f"📓 baseline captured: ${base:.2f} ({tag})")
 
@@ -91,7 +91,8 @@ class PositionManager:
         eq = self.equity()
         if eq <= 0:
             self.db.log_miss(coin, signal, "no_equity"); return None
-        notional = config.NOTIONAL_FRAC * eq
+        mult = config.size_mult(coin)
+        notional = config.NOTIONAL_FRAC * eq * mult
         margin = notional / config.LEVERAGE
         if margin > self.free_margin() + EPS:
             self.db.log_miss(coin, signal, "margin_full"); return None
@@ -140,8 +141,9 @@ class PositionManager:
             "label": f"ENTRY {coin.upper()}",
         })
         logger.info(f"    ✓ ENTRY {signal.upper()} {coin} {qty:.6f} @ ${avg:.6f} "
-                    f"(notional ${notional:.2f}, margin ${margin:.2f}, stop ${stop_px:.6f})")
-        tg_notify(f"ENTRY *{signal.upper()}* {coin} @ ${avg:.4f}\n"
+                    f"(notional ${notional:.2f}{' ½× WATCH' if mult < 1 else ''}, "
+                    f"margin ${margin:.2f}, stop ${stop_px:.6f})")
+        tg_notify(f"ENTRY *{signal.upper()}* {coin}{' (WATCH '+format(mult,'g')+'×)' if mult<1 else ''} @ ${avg:.4f}\n"
                   f"notional ${notional:.0f} · stop ${stop_px:.4f} · "
                   f"{len(self.db.open_positions())}/{self.max_concurrent} open", level="trade")
         return pos
