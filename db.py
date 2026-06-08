@@ -1,5 +1,5 @@
 """
-Soomario Swing Executor — State
+Soomario Libration — State
 ═══════════════════════════════
 SQLite is the operational source of truth the bot reads/writes each tick:
   account     — single row: equity, daily baseline, daily-DD halt flag
@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS misses (
 CREATE TABLE IF NOT EXISTS rsi_state (
   coin TEXT PRIMARY KEY, last_closed_4h_ts TEXT, last_rsi REAL
 );
+CREATE TABLE IF NOT EXISTS shadow_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, trail_pct REAL, side TEXT,
+  entry REAL, qty REAL, peak REAL, active INTEGER DEFAULT 0, hard_stop REAL, opened_at TEXT
+);
+CREATE TABLE IF NOT EXISTS shadow_trades (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, side TEXT, trail_pct REAL,
+  entry REAL, shadow_exit REAL, shadow_ret_pct REAL, shadow_net_pct REAL,
+  exit_reason TEXT, opened_at TEXT, shadow_closed_at TEXT
+);
 """
 
 
@@ -51,6 +60,8 @@ class DB:
         self.path = str(path or DB_PATH)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         # Ensure the singleton account row exists.
@@ -172,7 +183,61 @@ class DB:
         )
         self._conn.commit()
 
-    # ── equity snapshot for the dashboard curve ────────────────
+    # ── shadow trail A/B (counterfactual; never trades) ────────
+    def open_shadow(self, coin, trail_pct, side, entry, qty, hard_stop, opened_at):
+        self._conn.execute(
+            "INSERT INTO shadow_state (coin, trail_pct, side, entry, qty, peak, active, hard_stop, opened_at) "
+            "VALUES (?,?,?,?,?,?,0,?,?)",
+            (coin.upper(), trail_pct, side, entry, qty, entry, hard_stop, opened_at),
+        )
+        self._conn.commit()
+
+    def get_open_shadows(self, coin=None):
+        if coin:
+            rows = self._conn.execute("SELECT * FROM shadow_state WHERE coin=?", (coin.upper(),)).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM shadow_state").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_shadow(self, sid, **fields):
+        if not fields:
+            return
+        fields = {k: (int(v) if k == "active" else v) for k, v in fields.items()}
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self._conn.execute(f"UPDATE shadow_state SET {cols} WHERE id=?",
+                           tuple(fields.values()) + (sid,))
+        self._conn.commit()
+
+    def close_shadow(self, sid, shadow_exit, ret_pct, net_pct, reason, opened_at):
+        row = self._conn.execute("SELECT * FROM shadow_state WHERE id=?", (sid,)).fetchone()
+        if row is None:
+            return
+        self._conn.execute(
+            "INSERT INTO shadow_trades (coin, side, trail_pct, entry, shadow_exit, "
+            "shadow_ret_pct, shadow_net_pct, exit_reason, opened_at, shadow_closed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (row["coin"], row["side"], row["trail_pct"], row["entry"], shadow_exit,
+             round(ret_pct, 4), round(net_pct, 4), reason, opened_at, iso()),
+        )
+        self._conn.execute("DELETE FROM shadow_state WHERE id=?", (sid,))
+        self._conn.commit()
+
+    def shadow_summary(self):
+        """Median net %/trade per shadow trail, for the dashboard A/B panel."""
+        def _median(xs):
+            xs = sorted(xs)
+            n = len(xs)
+            if n == 0:
+                return None
+            return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+        out = {}
+        for tp, in self._conn.execute("SELECT DISTINCT trail_pct FROM shadow_trades").fetchall():
+            nets = [r[0] for r in self._conn.execute(
+                "SELECT shadow_net_pct FROM shadow_trades WHERE trail_pct=?", (tp,)).fetchall()]
+            out[tp] = {"n": len(nets), "median_net_pct": _median(nets),
+                       "win_rate": round(sum(1 for x in nets if x > 0) / len(nets) * 100, 2) if nets else None}
+        return out
+
     def snapshot_equity(self, equity: float, extra: Optional[dict] = None):
         """Append one equity point. Cadence = poll tick (EQUITY_CURVE_SPEC §2)."""
         entry = {"equity": round(float(equity), 4),

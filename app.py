@@ -42,6 +42,8 @@ try:
     from db import DB
     from position_manager import PositionManager
     from exit_manager import ExitManager
+    from shadow import ShadowTracker
+    import universe
     import signals
     from api import app as flask_app, attach_state
     print("[boot] modules OK", flush=True)
@@ -98,8 +100,19 @@ def run_worker():
     db = DB()
     pm = PositionManager(hl, db)
     em = ExitManager(hl, db, pm)
+    shadow = ShadowTracker(db)
     pm.ensure_seeded()
     attach_state(db)  # let the API read from this DB handle's file
+
+    # Universe report (informational). Off by default; only filters if asked.
+    try:
+        inc, rep = universe.evaluate(hl)
+        universe.log_report(rep)
+        if config.UNIVERSE_AUTOFILTER and inc:
+            config.COINS = [c for c in config.COINS if c in inc]
+            logger.info(f"universe autofilter ON -> trading {config.COINS}")
+    except Exception as e:
+        logger.warning(f"universe eval skipped: {e}")
 
     tg_notify(f"Libration worker STARTED — equity ${pm.equity():.2f}, "
               f"{len(config.COINS)} coins, mode {config_summary()['mode']}", level="info")
@@ -107,7 +120,7 @@ def run_worker():
     while True:
         try:
             t0 = time.time()
-            tick(hl, db, pm, em)
+            tick(hl, db, pm, em, shadow)
             time.sleep(max(1.0, POLL_SECONDS - (time.time() - t0)))
         except KeyboardInterrupt:
             logger.info("🛑 worker interrupted"); break
@@ -116,7 +129,7 @@ def run_worker():
             time.sleep(POLL_SECONDS)
 
 
-def tick(hl, db, pm, em):
+def tick(hl, db, pm, em, shadow):
     pm.maybe_reset_daily()
     now_ms = int(__import__("time").time() * 1000)
 
@@ -141,18 +154,24 @@ def tick(hl, db, pm, em):
             sig = signals.entry_signal(rsi[-2], rsi[-1], config.LONG_LEVEL, config.SHORT_LEVEL)
             if sig:
                 price = marks.get(coin) or closes[-1]
-                pm.maybe_enter(coin, sig, price)
+                pos = pm.maybe_enter(coin, sig, price)
+                if pos:
+                    shadow.on_open(pos)   # start the counterfactual A/B on this entry
         except Exception as e:
             logger.warning(f"entry eval {coin} failed: {e}")
 
-    # ── trailing management on open positions ──
+    # ── trailing management on open positions + shadow advancement ──
     for p in db.open_positions():
         price = marks.get(p["coin"])
         if price:
             em.manage(p, price)
+    for coin, price in marks.items():
+        shadow.on_price(coin, price)   # advance/close any open shadows on observed price
 
-    # ── live reconcile + daily-DD + snapshots ──
+    # ── live reconcile + shadow reap + daily-DD + snapshots ──
     em.reconcile()
+    open_coins = {p["coin"] for p in db.open_positions()}
+    shadow.reap(open_coins, marks)
     pm.check_daily_dd()
     equity = pm.equity()
     total_upnl = 0.0

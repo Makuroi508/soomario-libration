@@ -39,6 +39,7 @@ ASSET_META_FILE = STATE_DIR / "asset_meta.json"
 EQUITY_LOG = STATE_DIR / "equity_log.jsonl"
 TRADE_LOG  = STATE_DIR / "trade_log.jsonl"
 SIGNAL_LOG = STATE_DIR / "signal_log.jsonl"
+STATUS_FILE = STATE_DIR / "status.json"   # worker writes each tick; API reads
 
 # ─── Hyperliquid credentials (reused names from Aphelion) ───────
 HL_ACCOUNT_ADDRESS = os.getenv("HL_ACCOUNT_ADDRESS", "").strip()
@@ -60,6 +61,20 @@ TRAIL_ENABLED   = _b("TRAIL_ENABLED", "1")
 # against live prices and tracks its own equity, seeded once at first run.
 PAPER_START_EQUITY = _f("PAPER_START_EQUITY", 1000)
 PAPER_SLIPPAGE_PCT = _f("PAPER_SLIPPAGE_PCT", 0.0)  # adverse fill padding for realism
+
+# ─── Shadow trail A/B (counterfactual — never trades) ───────────
+# Live trades TRAIL_PCT; shadow tracks what these tighter trails WOULD have done
+# on the same entries/prices. Decide the trail from live data, not the backtest.
+SHADOW_TRAILS = [float(x) for x in os.getenv("SHADOW_TRAILS", "0.3,0.4").split(",") if x.strip()]
+# Round-trip friction charged to shadow exits so they're a FAIR comparison.
+# Placeholder = backtest assumption; update from the live realized-friction KPI
+# (or wire userFills) once Phase 1 produces real numbers. Spec §7b.
+MEASURED_FRICTION_PCT = _f("MEASURED_FRICTION_PCT", 0.5)
+
+# ─── Universe filter (universe.py) ──────────────────────────────
+MIN_ATR_PCT       = _f("MIN_ATR_PCT", 3.0)            # avg daily TR% floor (volatile alts only)
+MIN_DAILY_VOL_USD = _f("MIN_DAILY_VOL_USD", 10_000_000)
+UNIVERSE_AUTOFILTER = _b("UNIVERSE_AUTOFILTER")       # off: log report only, never silently drop
 
 # ─── Frozen strategy params (walk-forward validated) ────────────
 RSI_LEN       = _i("RSI_LEN", 14)

@@ -129,6 +129,39 @@ def api_stats():
     })
 
 
+@app.route("/api/shadow")
+def api_shadow():
+    """Live TRAIL_PCT vs shadow trails — median net %/trade after measured friction.
+    The Phase-1 trail A/B decision (spec §7b). Live side = real closed trades at
+    TRAIL_PCT; shadow side = counterfactual exits charged the measured friction."""
+    db = _db()
+
+    def _median(xs):
+        xs = sorted(xs); n = len(xs)
+        return None if n == 0 else (xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2)
+
+    live_nets = [t.get("net_pct") or 0 for t in db.recent_trades(2000)]
+    live = {
+        "trail_pct": config.TRAIL_PCT,
+        "n": len(live_nets),
+        "median_net_pct": round(_median(live_nets), 4) if live_nets else None,
+        "win_rate": round(sum(1 for x in live_nets if x > 0) / len(live_nets) * 100, 2) if live_nets else None,
+    }
+    shadows = []
+    for tp, s in sorted(db.shadow_summary().items()):
+        shadows.append({"trail_pct": tp, "n": s["n"],
+                        "median_net_pct": round(s["median_net_pct"], 4) if s["median_net_pct"] is not None else None,
+                        "win_rate": s["win_rate"]})
+    return jsonify({
+        "ts": iso(),
+        "measured_friction_pct": config.MEASURED_FRICTION_PCT,
+        "live": live,
+        "shadows": shadows,
+        "note": "Decide the trail only after ~50 matched trades; shadow exits are "
+                "charged measured friction for fairness (spec §7b).",
+    })
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Equity curve — conforms to EQUITY_CURVE_SPEC.md v1.2 (§7 verbatim)
 # ═══════════════════════════════════════════════════════════════
