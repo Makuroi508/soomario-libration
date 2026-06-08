@@ -95,7 +95,7 @@ NOTIONAL_FRAC = _f("NOTIONAL_FRAC", 0.20)  # 20% of equity notional per position
 MAX_CONCURRENT = int(LEVERAGE / NOTIONAL_FRAC + 1e-9)
 
 # ─── Universe (volatile alt perps; main DEX only — no HIP-3) ────
-_DEFAULT_COINS = "SOL,HYPE,AVAX,LINK,NEAR,ADA,DOGE,BCH,LTC,DOT,ATOM"
+_DEFAULT_COINS = "SOL,AVAX,LINK,NEAR,ADA,DOGE,BCH,LTC,DOT,ATOM"
 COINS = [c.strip().upper() for c in os.getenv("COINS", _DEFAULT_COINS).split(",") if c.strip()]
 
 # ─── Timing ─────────────────────────────────────────────────────
@@ -121,7 +121,18 @@ def asset_dex(asset: str) -> str:
 
 def hl_symbol(asset: str) -> str:
     asset = asset.upper()
-    return asset.split(":", 1)[1] if ":" in asset else asset
+    sym = asset.split(":", 1)[1] if ":" in asset else asset
+    return _HL_K_TOKENS.get(sym, sym)
+
+
+# HL denominates some low-unit-price tokens in thousands with a CASE-SENSITIVE
+# lowercase 'k' prefix (kPEPE, not KPEPE). Internally we uppercase everything;
+# this maps back to the exact HL symbol at the API boundary (orders, candles,
+# prices, asset_meta keys). Extend if a new k-token enters the universe.
+_HL_K_TOKENS = {
+    "KPEPE": "kPEPE", "KSHIB": "kSHIB", "KBONK": "kBONK", "KFLOKI": "kFLOKI",
+    "KLUNC": "kLUNC", "KDOGS": "kDOGS", "KNEIRO": "kNEIRO", "KAPU": "kAPU",
+}
 
 
 def short_name(coin: str) -> str:

@@ -159,7 +159,7 @@ def build_asset_meta() -> dict:
                 prefix, _, asset_part = raw_name.partition(":")
                 hl_name = f"{prefix.lower()}:{asset_part.upper()}"
             else:
-                hl_name = f"{dex}:{raw_name.upper()}" if dex else raw_name.upper()
+                hl_name = f"{dex}:{raw_name.upper()}" if dex else hl_symbol(raw_name)
             sz_dec = int(entry.get("szDecimals", 2))
             price_dec = max(0, 6 - sz_dec)
             out[hl_name] = {
@@ -306,7 +306,7 @@ class HLClient:
                     mids = resp.json()
                     if isinstance(mids, dict):
                         for a in main_assets:
-                            v = mids.get(a.upper())
+                            v = mids.get(hl_symbol(a))
                             if v is not None:
                                 try:
                                     out[a.upper()] = float(v)
