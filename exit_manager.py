@@ -20,7 +20,7 @@ import logging
 from datetime import datetime
 
 import config
-from utils import iso, append_jsonl
+from utils import iso, append_jsonl, tg_notify
 from config import TRADE_LOG, short_name
 
 logger = logging.getLogger("exit_manager")
@@ -141,6 +141,9 @@ class ExitManager:
         fr = "" if friction_pct is None else f" friction {friction_pct:+.2f}%"
         logger.info(f"    ◼ CLOSE {reason} {pos['coin']} @ ${fill_px:.6f} "
                     f"(net {net_pct:+.2f}%, pnl ${net_pnl:+.2f}{fr})")
+        tg_notify(f"CLOSE *{reason}* {pos['coin']} @ ${fill_px:.4f}\n"
+                  f"net {net_pct:+.2f}% · pnl ${net_pnl:+.2f}{fr}",
+                  level="trail" if reason == "TRAIL" else "trade")
 
     def _resolve_exit_fill(self, pos):
         """Return (avg_fill_px, total_fee) from the position's actual closing

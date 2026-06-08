@@ -16,7 +16,7 @@ reason — fill rate is a KPI (target ~85% at 2x).
 import logging
 
 import config
-from utils import iso, utc_date_str, append_jsonl
+from utils import iso, utc_date_str, append_jsonl, tg_notify
 from config import TRADE_LOG
 
 logger = logging.getLogger("position_manager")
@@ -131,7 +131,7 @@ class PositionManager:
         pos = dict(
             coin=coin.upper(), side=signal, entry=avg, qty=qty, notional=notional,
             margin=margin, peak=avg, hard_stop=stop_px, hard_stop_id=stop_id,
-            trail_active=0, trail_stop=None, opened_at=iso(),
+            trail_active=0, trail_stop=None, intended_entry=price, opened_at=iso(),
         )
         self.db.insert_position(pos)
         append_jsonl(TRADE_LOG, {
@@ -141,6 +141,9 @@ class PositionManager:
         })
         logger.info(f"    ✓ ENTRY {signal.upper()} {coin} {qty:.6f} @ ${avg:.6f} "
                     f"(notional ${notional:.2f}, margin ${margin:.2f}, stop ${stop_px:.6f})")
+        tg_notify(f"ENTRY *{signal.upper()}* {coin} @ ${avg:.4f}\n"
+                  f"notional ${notional:.0f} · stop ${stop_px:.4f} · "
+                  f"{len(self.db.open_positions())}/{self.max_concurrent} open", level="trade")
         return pos
 
     def _paper_fill_price(self, price: float, is_long: bool) -> float:
@@ -168,3 +171,6 @@ class PositionManager:
             self.db.set_account(daily_halt=1)
             logger.warning(f"🛑 DAILY DD HALT: down {dd:.2f}% >= {config.DAILY_DD_PCT}% "
                            f"— no new entries until UTC rollover (open positions ride their stops)")
+            tg_notify(f"*DAILY DD HALT* — down {dd:.2f}% on the day.\n"
+                      f"No new entries until UTC rollover; open positions keep their stops.",
+                      level="warn")
