@@ -114,6 +114,8 @@ a{color:inherit;text-decoration:none}
 .pc-pnl small{display:block;font-size:10px;font-weight:500;opacity:.8}
 /* ── position bar: price track with markers (entry / live / peak / trail / arm) ── */
 .pbar{position:relative;height:10px;border-radius:5px;background:rgba(123,94,167,0.14);margin:11px 0 6px}
+.pbar.dir-long{background:rgba(94,234,212,0.09);box-shadow:inset 4px 0 0 0 rgba(94,234,212,.75)}
+.pbar.dir-short{background:rgba(251,146,60,0.10);box-shadow:inset 4px 0 0 0 rgba(251,146,60,.80)}
 .pbar-fill{position:absolute;top:0;bottom:0;border-radius:5px;opacity:.9}
 .pbar-fill.gain{background:linear-gradient(90deg,rgba(74,222,128,.30),rgba(74,222,128,.70))}
 .pbar-fill.armed{background:linear-gradient(90deg,rgba(212,168,67,.40),rgba(74,222,128,.65))}
@@ -339,6 +341,11 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
             <span><span class="ad" style="background:#F87171"></span>Hard stop</span>
           </div>
         </div>
+        <!-- universe pulse (under the curve, left column) -->
+        <div class="crd" style="margin-top:18px">
+          <div class="crd-h">Universe Pulse <span class="crd-sub">how close each coin is to a trade</span></div>
+          <div class="pulse" id="pulse"><div class="placeholder">warming up…</div></div>
+        </div>
       </div>
 
       <!-- right: live open positions -->
@@ -349,12 +356,6 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
           <div class="poslist" id="ovPos"><div class="placeholder">no open positions</div></div>
         </div>
       </div>
-    </div>
-
-    <!-- universe pulse (full width) -->
-    <div class="crd">
-      <div class="crd-h">Universe Pulse <span class="crd-sub">how close each coin is to a trade</span></div>
-      <div class="pulse" id="pulse"><div class="placeholder">warming up…</div></div>
     </div>
 
     <!-- live validation (full width, bottom) -->
@@ -545,7 +546,7 @@ function positionBar(p){
   if(rPeak>0.05) mk+=`<i class="pbar-mk peak" style="left:${pkP}%"></i>`;
   mk+=`<i class="pbar-mk entry" style="left:${eP}%"></i>`;
   mk+=`<i class="pbar-mk cur" style="left:${cP}%"></i>`;
-  return `<div class="pbar">${mk}</div>`;
+  return `<div class="pbar dir-${p.side}">${mk}</div>`;
 }
 function posStatus(p){
   return p.trail_active
