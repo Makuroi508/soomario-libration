@@ -191,6 +191,26 @@ class DB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def realized_pnl(self) -> float:
+        """Total realized PnL (net of fees), summed straight from the trade
+        ledger. This is the DURABLE source of truth for returns: it's rebuilt
+        from the trade records every time, so a baseline/inception reset can
+        never wipe it as long as the trades table survives. Reconstructs the
+        exact net_pnl booked at close: (exit-entry)*qty*side - fee."""
+        rows = self._conn.execute(
+            "SELECT side, entry, exit, qty, fee FROM trades").fetchall()
+        tot = 0.0
+        for r in rows:
+            entry, exit_, qty = r["entry"], r["exit"], r["qty"]
+            if entry is None or exit_ is None or qty is None:
+                continue
+            sign = 1.0 if r["side"] == "long" else -1.0
+            tot += (float(exit_) - float(entry)) * sign * float(qty) - float(r["fee"] or 0.0)
+        return round(tot, 6)
+
+    def trade_count(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+
     def measured_friction(self):
         """Mean realized round-trip friction % across trades that have it (live
         only; paper books at idealized prices). None until live fills exist."""

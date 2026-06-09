@@ -41,6 +41,19 @@ class PositionManager:
         PAPER_START_EQUITY; LIVE captures the wallet value at go-live."""
         acct = self.db.account()
         if acct["equity"] and acct["equity"] > 0:
+            # Existing account: backfill inception ONCE if it's missing. Older
+            # rows predate the inception column, so it reads NULL and the
+            # dashboard used to fall back to daily_baseline — which resets every
+            # UTC day and silently zeroed out "since inception" returns. The true
+            # baseline is current realized-equity minus PnL booked in the ledger.
+            if not acct.get("inception"):
+                realized = self.db.realized_pnl()
+                inception = (acct["equity"] or 0.0) - realized
+                self.db.set_account(inception=inception,
+                                    inception_ts=acct.get("inception_ts") or iso())
+                logger.info(f"📓 inception backfilled: ${inception:.2f} "
+                            f"(equity ${acct['equity']:.2f} − realized ${realized:.2f} "
+                            f"from {self.db.trade_count()} trades)")
             return
         base = config.PAPER_START_EQUITY if config.PAPER else (self.client.get_equity() or 0.0)
         if base > 0:

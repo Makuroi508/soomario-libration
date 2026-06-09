@@ -113,10 +113,7 @@ def api_stats():
     n = len(closed)
     wins = sum(1 for t in closed if (t.get("net_pct") or 0) > 0)
     avg_net = (sum(t.get("net_pct") or 0 for t in closed) / n) if n else 0.0
-    realized = 0.0
-    for t in closed:
-        move = (t["exit"] - t["entry"]) if t["side"] == "long" else (t["entry"] - t["exit"])
-        realized += move * (t.get("qty") or 0)
+    realized = db.realized_pnl()   # durable, fee-aware, single source of truth
 
     open_n = len(db.open_positions())
     n_miss = db._conn.execute("SELECT COUNT(*) FROM misses").fetchone()[0]

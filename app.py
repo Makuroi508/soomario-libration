@@ -73,9 +73,14 @@ def _write_status(db, pm, equity, total_upnl, marks):
             "reduced": p["coin"].upper() in config.WATCH_SET,
         })
     acct = db.account()
-    inception = acct.get("inception") or acct.get("daily_baseline") or equity or 0.0
-    realized_pnl = (acct["equity"] or 0.0) - inception
-    total_pnl = equity - inception
+    # inception is a fixed baseline (backfilled at boot). NEVER fall back to
+    # daily_baseline — that resets every UTC day and would zero out returns.
+    inception = acct.get("inception") or equity or 0.0
+    # Realized comes from the durable trade ledger, not the mutable accumulator,
+    # so a baseline reset can't wipe it. Total $ = realized + open unrealized,
+    # which is inception-independent and therefore robust across redeploys.
+    realized_pnl = db.realized_pnl()
+    total_pnl = realized_pnl + (total_upnl or 0.0)
     day = None
     if acct.get("inception_ts"):
         try:
