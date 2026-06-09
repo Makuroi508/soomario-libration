@@ -105,10 +105,13 @@ class ExitManager:
         if not crossed:
             return
         reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
+        # Log-only: the backstop firing is expected as long as native triggers
+        # aren't surviving on the exchange (e.g. a shared vault). The routine
+        # close is reported by the normal CLOSE notification below — no need to
+        # alarm on every exit. We only escalate to Telegram if the close can't
+        # be confirmed (a position may still be open — that IS worth a ping).
         logger.warning(f"🛟 {pos['coin']} ${price:.6f} crossed stop ${stop:.6f} but still open "
                        f"— forcing reduce-only market close (resting trigger missing/failed)")
-        tg_notify(f"⚠️ SAFETY CLOSE {pos['coin']} — price ${price:.4f} crossed stop "
-                  f"${stop:.4f} with no working trigger; forcing market close.", level="warn")
         res = self.client.market_close(pos["coin"], pos["qty"], is_long, current_price=price)
         if res and res.get("filled"):
             sid = pos.get("hard_stop_id")
@@ -122,6 +125,9 @@ class ExitManager:
         else:
             logger.error(f"❌ {pos['coin']} safety market_close did not confirm a fill: {res} "
                          f"— will retry next tick. SET A MANUAL STOP if this persists.")
+            tg_notify(f"⚠️ {pos['coin']}: stop crossed at ${price:.4f} but the close did NOT "
+                      f"confirm — the position may still be OPEN. Check the exchange and set a "
+                      f"manual stop if needed.", level="warn")
 
     def _move_stop(self, pos, qty, new_stop, updates):
         new_stop = round(new_stop, 8)
