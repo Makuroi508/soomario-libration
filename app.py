@@ -37,7 +37,7 @@ try:
     print("[boot] utils + logging OK", flush=True)
 
     import config
-    from config import POLL_SECONDS, DASHBOARD_PORT, short_name, summary as config_summary
+    from config import POLL_SECONDS, DASHBOARD_PORT, short_name, EQUITY_LOG, TRADE_LOG, summary as config_summary
     print("[boot] config OK", flush=True)
 
     from hl_client import HLClient, build_asset_meta
@@ -151,6 +151,63 @@ def _repair_phantom_closes(hl, db):
         logger.info("repair: no phantom closes matched.")
 
 
+def _write_jsonl(path, lines):
+    """Atomically (re)write a JSONL file from scratch."""
+    import json as _json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w") as f:
+        for e in lines:
+            e = {**e, "ts": e.get("ts") or iso()}
+            f.write(_json.dumps(e, default=str) + "\n")
+    os.replace(tmp, path)
+
+
+def _rebuild_logs_from_ledger(db):
+    """Rebuild the equity-curve logs from the durable trade ledger. Because the
+    phantom trades were already removed from the ledger, the rebuilt curve simply
+    excludes them — no dip, no phantom hard-stop marker. The equity line becomes
+    inception + cumulative realized PnL at each close; live ticks append the
+    current (realized + unrealized) tip afterward."""
+    acct = db.account()
+    inception = acct.get("inception") or 0.0
+    inception_ts = acct.get("inception_ts") or iso()
+    trades = db._conn.execute(
+        "SELECT coin, side, entry, exit, qty, fee, net_pct, exit_reason, opened_at, closed_at "
+        "FROM trades ORDER BY COALESCE(closed_at, '') ASC, id ASC").fetchall()
+
+    eq_lines = [{"ts": inception_ts, "equity": round(inception, 4), "active_positions": 0}]
+    cum = 0.0
+    for t in trades:
+        sign = 1.0 if t["side"] == "long" else -1.0
+        try:
+            net_pnl = (float(t["exit"]) - float(t["entry"])) * sign * float(t["qty"] or 0) - float(t["fee"] or 0)
+        except (TypeError, ValueError):
+            net_pnl = 0.0
+        cum += net_pnl
+        eq_lines.append({"ts": t["closed_at"] or inception_ts,
+                         "equity": round(inception + cum, 4), "active_positions": 0})
+
+    ev_lines = []
+    for t in trades:
+        coin = t["coin"].upper()
+        ev_lines.append({"ts": t["opened_at"] or inception_ts, "action": "ENTRY",
+                         "asset": coin, "side": t["side"], "entry": t["entry"],
+                         "qty": t["qty"], "label": f"ENTRY {coin}"})
+        net = t["net_pct"] or 0.0
+        ev_lines.append({"ts": t["closed_at"] or inception_ts, "action": "EXIT",
+                         "type": t["exit_reason"] or "EXIT", "asset": coin, "side": t["side"],
+                         "net_pct": net, "label": f"EXIT {coin} {net:+.2f}%"})
+    ev_lines.sort(key=lambda e: e.get("ts") or "")
+
+    _write_jsonl(EQUITY_LOG, eq_lines)
+    _write_jsonl(TRADE_LOG, ev_lines)
+    logger.warning(f"🩺 rebuilt curve from ledger: {len(trades)} trades -> {len(eq_lines)} "
+                   f"equity points, {len(ev_lines)} events. Realized-equity ${inception + cum:.2f}")
+    tg_notify(f"🩺 Equity curve rebuilt from the trade ledger ({len(trades)} trades) — "
+              f"the phantom dip is gone.", level="info")
+
+
 def run_worker():
     time.sleep(3)  # let Flask bind first
     logger.info("═" * 60)
@@ -175,6 +232,8 @@ def run_worker():
     # which proves the close was fabricated. Remove the env var after one run.
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
+    if os.getenv("REBUILD_CURVE") == "1":
+        _rebuild_logs_from_ledger(db)
     # Self-heal: re-adopt any open exchange position the DB has lost, so the bot
     # manages it instead of abandoning it (or doubling it). Runs every boot.
     pm.adopt_unmanaged()
