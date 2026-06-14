@@ -108,6 +108,17 @@ class PositionManager:
                 logger.info(f"📓 inception backfilled: ${inception:.2f} "
                             f"(equity ${acct['equity']:.2f} − realized ${realized:.2f} "
                             f"from {self.db.trade_count()} trades)")
+            # Pin the equity accumulator to the ledger. account.equity is meant to
+            # be inception + cumulative realized; if the ledger is edited out-of-band
+            # (e.g. phantom trades removed during recovery) the accumulator can be
+            # left stale/drifted. Recomputing it from inception + realized_pnl()
+            # makes it self-heal so the live curve point matches the rebuilt history.
+            inception = self.db.account().get("inception") or 0.0
+            synced = round(inception + self.db.realized_pnl(), 4)
+            if abs(synced - (acct["equity"] or 0.0)) > 0.01:
+                self.db.set_account(equity=synced)
+                logger.info(f"📓 equity resynced to ledger: ${synced:.2f} "
+                            f"(was ${acct['equity']:.2f}; drift corrected)")
             return
         base = config.PAPER_START_EQUITY if config.PAPER else (self.client.get_equity() or 0.0)
         if base > 0:
