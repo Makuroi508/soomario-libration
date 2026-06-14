@@ -16,6 +16,7 @@ Each tick the worker:
   5. check the 5% daily-DD halt
   6. snapshot equity (dashboard curve) + write status.json (dashboard reads it)
 """
+import os
 import sys
 import traceback
 
@@ -36,7 +37,7 @@ try:
     print("[boot] utils + logging OK", flush=True)
 
     import config
-    from config import POLL_SECONDS, DASHBOARD_PORT, summary as config_summary
+    from config import POLL_SECONDS, DASHBOARD_PORT, short_name, summary as config_summary
     print("[boot] config OK", flush=True)
 
     from hl_client import HLClient, build_asset_meta
@@ -121,6 +122,35 @@ def _universe_refresh(hl):
         logger.warning(f"universe eval skipped: {e}")
 
 
+def _repair_phantom_closes(hl, db):
+    """One-time recovery for phantom -10% closes booked during an API outage.
+    Removes only provably-fabricated closes: coin still open on the exchange at
+    the same entry, booked at the hard-stop level. REPAIR_PHANTOM_COINS may name
+    extra coins to clear (e.g. one that has since genuinely flattened)."""
+    live = hl.get_positions()
+    if live is None:
+        logger.warning("repair: exchange read failed — skipping phantom-close repair.")
+        return
+    live_by_coin = {}
+    for p in live:
+        coin = short_name(str(p.get("coin", ""))).upper()
+        try:
+            entry = float(p.get("entryPx") or 0)
+        except (TypeError, ValueError):
+            entry = 0.0
+        if coin and entry > 0:
+            live_by_coin[coin] = entry
+    forced = [c.strip().upper() for c in os.getenv("REPAIR_PHANTOM_COINS", "").split(",") if c.strip()]
+    removed = db.delete_phantom_closes(live_by_coin, forced_coins=forced)
+    if removed:
+        for c, ex, net in removed:
+            logger.warning(f"🩺 repair: removed phantom close {c} exit ${ex} net {net:+.2f}%")
+        tg_notify(f"🩺 Repaired {len(removed)} phantom close(s) wrongly booked during the API "
+                  f"outage; realized P&L corrected.", level="info")
+    else:
+        logger.info("repair: no phantom closes matched.")
+
+
 def run_worker():
     time.sleep(3)  # let Flask bind first
     logger.info("═" * 60)
@@ -139,6 +169,15 @@ def run_worker():
     em = ExitManager(hl, db, pm)
     shadow = ShadowTracker(db)
     pm.ensure_seeded()
+    # One-time incident repair: remove phantom closes (booked when a flaky API
+    # read made live positions look closed). Gated by env REPAIR_PHANTOM_CLOSES=1;
+    # only deletes a "closed" trade when that coin is STILL OPEN on the exchange,
+    # which proves the close was fabricated. Remove the env var after one run.
+    if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
+        _repair_phantom_closes(hl, db)
+    # Self-heal: re-adopt any open exchange position the DB has lost, so the bot
+    # manages it instead of abandoning it (or doubling it). Runs every boot.
+    pm.adopt_unmanaged()
     attach_state(db)  # let the API read from this DB handle's file
 
     # Universe evaluation (informational). Off by default; only filters if asked.
@@ -207,7 +246,12 @@ def tick(hl, db, pm, em, shadow):
         except Exception as e:
             logger.warning(f"entry eval {coin} failed: {e}")
 
-    # ── trailing management on open positions + shadow advancement ──
+    # ── reconcile FIRST: book any position the exchange already closed (native
+    # trigger filled) and drop it from the open set, so the trailing/backstop
+    # pass below never acts on a position that's already flat. ──
+    em.reconcile()
+
+    # ── trailing management on (still) open positions + shadow advancement ──
     for p in db.open_positions():
         price = marks.get(p["coin"])
         if price:
@@ -215,8 +259,7 @@ def tick(hl, db, pm, em, shadow):
     for coin, price in marks.items():
         shadow.on_price(coin, price)   # advance/close any open shadows on observed price
 
-    # ── live reconcile + shadow reap + daily-DD + snapshots ──
-    em.reconcile()
+    # ── shadow reap + daily-DD + snapshots ──
     open_coins = {p["coin"] for p in db.open_positions()}
     shadow.reap(open_coins, marks)
     pm.check_daily_dd()

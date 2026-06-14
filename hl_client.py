@@ -377,7 +377,11 @@ class HLClient:
 
     # ── Account state (fan out across DEXes) ──────────────────
 
-    def _fetch_clearinghouse(self, dex: str) -> dict:
+    def _fetch_clearinghouse(self, dex: str):
+        """Returns the clearinghouse dict on success, or None on a failed read
+        (timeout / non-200 / bad JSON). None is NOT the same as 'no positions' —
+        callers must distinguish, or a transient API failure looks like a mass
+        close and can fabricate phantom exits."""
         try:
             body = {"type": "clearinghouseState", "user": self.account_address}
             if dex:
@@ -385,20 +389,26 @@ class HLClient:
             resp = requests.post(HL_API_URL, json=body, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                return data if isinstance(data, dict) else {}
+                return data if isinstance(data, dict) else None
+            logger.debug(f"clearinghouseState(dex={dex!r}) HTTP {resp.status_code}")
         except Exception as e:
             logger.debug(f"clearinghouseState(dex={dex!r}) error: {e}")
-        return {}
+        return None
 
-    def get_positions(self) -> list[dict]:
+    def get_positions(self):
         """
-        All open positions across every DEX in COINS.
+        All open positions across every DEX in COINS, or None if ANY DEX read
+        failed (so a transient API outage can't masquerade as 'no positions').
         HIP-3 positions have prefixed coin names ('xyz:MSTR'); use
         config.short_name() to normalize for matching.
         """
         out = []
         for dex in active_dexes(COINS):
             state = self._fetch_clearinghouse(dex)
+            if state is None:
+                logger.warning(f"get_positions: clearinghouse read failed for dex={dex!r} "
+                               f"— returning None (unreliable read).")
+                return None
             for pw in state.get("assetPositions", []) or []:
                 if not isinstance(pw, dict):
                     continue
@@ -415,7 +425,7 @@ class HLClient:
 
     def get_position(self, symbol: str) -> Optional[dict]:
         target = short_name(symbol) if ":" in symbol else symbol.upper()
-        for p in self.get_positions():
+        for p in (self.get_positions() or []):
             if short_name(p.get("coin", "")) == target:
                 return p
         return None

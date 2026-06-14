@@ -211,6 +211,37 @@ class DB:
     def trade_count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
 
+    def delete_phantom_closes(self, live_by_coin: dict, forced_coins=None, entry_tol=0.01):
+        """Remove fabricated 'closes' from the ledger. A trade is provably phantom
+        when the coin is CURRENTLY OPEN on the exchange at (essentially) the same
+        entry the closed trade recorded, and it was booked at the hard-stop level
+        (~-10%). `forced_coins` additionally removes the latest such hard-stop
+        close for named coins even if not currently open (user-verified).
+        Returns the list of removed (coin, exit, net_pct)."""
+        removed = []
+        forced = {c.upper() for c in (forced_coins or [])}
+        candidates = dict(live_by_coin)
+        for c in forced:
+            candidates.setdefault(c, None)
+        for coin, live_entry in candidates.items():
+            rows = self._conn.execute(
+                "SELECT id, entry, exit, net_pct, exit_reason FROM trades "
+                "WHERE coin=? ORDER BY id DESC LIMIT 5", (coin,)).fetchall()
+            for r in rows:
+                net = r["net_pct"] or 0.0
+                if r["exit_reason"] != "HARD_STOP" or net > -9.0:
+                    continue  # only the fabricated ~-10% hard-stop signature
+                if live_entry is not None:
+                    entry = r["entry"] or 0.0
+                    if entry <= 0 or abs(entry - live_entry) / live_entry > entry_tol:
+                        continue  # not the same position that's still open
+                self._conn.execute("DELETE FROM trades WHERE id=?", (r["id"],))
+                removed.append((coin, r["exit"], net))
+                break  # one phantom per coin
+        if removed:
+            self._conn.commit()
+        return removed
+
     def measured_friction(self):
         """Mean realized round-trip friction % across trades that have it (live
         only; paper books at idealized prices). None until live fills exist."""

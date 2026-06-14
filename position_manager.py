@@ -17,7 +17,7 @@ import logging
 
 import config
 from utils import iso, utc_date_str, append_jsonl, tg_notify
-from config import TRADE_LOG
+from config import TRADE_LOG, short_name
 
 logger = logging.getLogger("position_manager")
 EPS = 1e-9
@@ -33,6 +33,60 @@ class PositionManager:
     def ensure_seeded(self):
         """Public hook called at startup. Captures the starting baseline once."""
         self._ensure_baseline()
+
+    def adopt_unmanaged(self):
+        """Self-heal: re-adopt any OPEN exchange position the DB doesn't know
+        about. The exchange is ground truth. This recovers positions that a bad
+        reconcile/divergence dropped from the book, so the bot resumes managing
+        (trailing + protecting) them instead of abandoning them — and would
+        re-open them on top, doubling exposure. Runs once at startup (LIVE only).
+        Skipped entirely on an unreliable read."""
+        if config.PAPER:
+            return
+        try:
+            live = self.client.get_positions()
+        except Exception as e:
+            logger.warning(f"adopt: could not read exchange positions: {e}")
+            return
+        if not live:   # None (failed read) or [] (genuinely flat) → nothing to adopt
+            return
+        known = {p["coin"].upper() for p in self.db.open_positions()}
+        hs = config.HARD_STOP_PCT / 100.0
+        adopted = 0
+        for p in live:
+            coin = short_name(str(p.get("coin", ""))).upper()
+            if not coin or coin in known:
+                continue
+            try:
+                szi = float(p.get("szi", 0) or 0)
+                entry = float(p.get("entryPx") or 0)
+            except (TypeError, ValueError):
+                continue
+            qty = abs(szi)
+            if szi == 0 or entry <= 0 or qty <= 0:
+                continue
+            side = "long" if szi > 0 else "short"
+            hard = entry * (1 - hs) if side == "long" else entry * (1 + hs)
+            notional = entry * qty
+            self.db.insert_position(dict(
+                coin=coin, side=side, entry=entry, qty=qty, notional=notional,
+                margin=notional / config.LEVERAGE, peak=entry, hard_stop=hard,
+                hard_stop_id=None, trail_active=0, trail_stop=None,
+                intended_entry=entry, opened_at=iso()))
+            # (re)place a native protective stop so it isn't left naked.
+            try:
+                sid = self.client.place_stop_market(coin, side == "long", qty, hard)
+                if sid:
+                    self.db.update_position(coin, hard_stop_id=str(sid))
+            except Exception as e:
+                logger.warning(f"adopt {coin}: stop placement failed: {e}")
+            adopted += 1
+            logger.warning(f"🩺 adopted unmanaged exchange position {coin} {side} "
+                           f"{qty}@${entry:.6f} (hard stop ${hard:.6f})")
+            tg_notify(f"🩺 Re-adopted {coin} {side} {qty}@${entry:.6f} from the exchange "
+                      f"(it was missing from the bot's book).", level="info")
+        if adopted:
+            logger.warning(f"🩺 adopt: re-adopted {adopted} unmanaged position(s) from the exchange.")
 
     def _ensure_baseline(self):
         """Seed account.equity with starting capital ONCE. After this, account.equity

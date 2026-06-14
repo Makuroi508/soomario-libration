@@ -32,6 +32,7 @@ class ExitManager:
         self.client = client
         self.db = db
         self.pm = position_manager  # for paper realized-equity bookkeeping
+        self._gone_streak = {}      # coin -> consecutive 'absent w/o fill' reconcile passes
 
     # ── per-position trailing management ───────────────────────
     def manage(self, pos: dict, price: float):
@@ -123,11 +124,32 @@ class ExitManager:
             fill = res.get("avg_price") or stop
             self.close_position(pos, fill_px=fill, reason=reason, intended_exit=stop)
         else:
-            logger.error(f"❌ {pos['coin']} safety market_close did not confirm a fill: {res} "
-                         f"— will retry next tick. SET A MANUAL STOP if this persists.")
-            tg_notify(f"⚠️ {pos['coin']}: stop crossed at ${price:.4f} but the close did NOT "
-                      f"confirm — the position may still be OPEN. Check the exchange and set a "
-                      f"manual stop if needed.", level="warn")
+            # The close didn't confirm. Usually benign: a native trigger already
+            # closed this position and the DB hasn't caught up yet, so HL rejects
+            # the reduce-only with "would increase position" on a flat book.
+            # reconcile books it. Only alarm if it's genuinely STILL open.
+            if self._still_open_on_exchange(pos["coin"]):
+                logger.error(f"❌ {pos['coin']} safety market_close did not confirm and the "
+                             f"position is STILL OPEN — will retry next tick.")
+                tg_notify(f"⚠️ {pos['coin']}: stop crossed at ${price:.4f} but the close did "
+                          f"NOT confirm and the position is still OPEN. Check the exchange and "
+                          f"set a manual stop.", level="warn")
+            else:
+                logger.info(f"🛟 {pos['coin']} already closed on the exchange (native trigger "
+                            f"filled) — reconcile will book it. No action needed.")
+
+    def _still_open_on_exchange(self, coin):
+        """True if the exchange still shows an open position in `coin`. On any
+        read failure (None / exception), assume True — safer to warn than to
+        wrongly treat a failed read as 'already closed'."""
+        try:
+            live = self.client.get_positions()
+        except Exception:
+            return True
+        if live is None:
+            return True
+        live_coins = {short_name(str(p.get("coin", p.get("symbol", "")))).upper() for p in live}
+        return coin.upper() in live_coins
 
     def _move_stop(self, pos, qty, new_stop, updates):
         new_stop = round(new_stop, 8)
@@ -211,28 +233,49 @@ class ExitManager:
 
     # ── live reconcile — exchange is source of truth ───────────
     def reconcile(self):
-        """LIVE: if a position is open in the DB but gone on the exchange, its
-        stop filled out-of-band — book it at the ACTUAL fill from userFills so
-        realized friction (intended stop vs real fill) is measured, not guessed.
-        Falls back to the stop-level estimate if fills aren't indexed yet."""
+        """LIVE: book a position as closed ONLY when the exchange confirms it AND
+        a real closing fill exists. A position can only leave the exchange via a
+        stop fill, market close, or liquidation — all of which produce a
+        userFills record. If a position is missing from the exchange but NO fill
+        is found, that's an unreliable read (HL was timing out), NOT a close:
+        we never fabricate an exit. This is the guard against the incident where
+        a flaky API read booked live positions as phantom -10% hard stops."""
         if config.PAPER:
             return
-        try:
-            live = self.client.get_positions() or []
-        except Exception as e:
-            logger.warning(f"reconcile: could not read exchange positions: {e}")
+        live = self.client.get_positions()
+        if live is None:
+            logger.warning("reconcile: exchange read failed — skipping this pass.")
             return
-        live_coins = {short_name(p.get("coin", p.get("symbol", ""))) for p in live}
-        for pos in self.db.open_positions():
-            if pos["coin"].upper() in live_coins:
+        open_db = self.db.open_positions()
+        if not open_db:
+            return
+        # Sanity gate: an empty exchange while the DB holds positions is almost
+        # always a partial/failed read, not a simultaneous mass-close. Skip.
+        if not live:
+            logger.warning(f"reconcile: exchange shows 0 positions but DB has "
+                           f"{len(open_db)} open — unreliable read, skipping.")
+            return
+        live_coins = {short_name(str(p.get("coin", p.get("symbol", "")))).upper() for p in live}
+        for pos in open_db:
+            coin = pos["coin"].upper()
+            if coin in live_coins:
+                self._gone_streak.pop(coin, None)
                 continue
             stop = pos["trail_stop"] if pos["trail_stop"] is not None else pos["hard_stop"]
             reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
             resolved = self._resolve_exit_fill(pos)
             if resolved:
                 fill_px, fee = resolved
-                logger.info(f"reconcile: {pos['coin']} closed on exchange — actual fill ${fill_px:.6f}")
+                logger.info(f"reconcile: {coin} closed on exchange — actual fill ${fill_px:.6f}")
                 self.close_position(pos, fill_px=fill_px, reason=reason, fee=fee, intended_exit=stop)
+                self._gone_streak.pop(coin, None)
             else:
-                logger.info(f"reconcile: {pos['coin']} gone, fills not indexed yet — estimate ${stop:.6f}")
-                self.close_position(pos, fill_px=stop, reason=reason, intended_exit=stop)
+                # Absent but no confirming fill: do NOT book. Likely a stale read.
+                n = self._gone_streak.get(coin, 0) + 1
+                self._gone_streak[coin] = n
+                logger.warning(f"reconcile: {coin} absent from exchange but NO closing fill found "
+                               f"(streak {n}) — NOT booking a phantom exit; rechecking next tick.")
+                if n == 5:
+                    tg_notify(f"⚠️ {coin}: the bot still holds this in its book but it's absent "
+                              f"from the exchange with no fill on record. Please check it manually "
+                              f"— the bot will NOT auto-close without a confirmed fill.", level="warn")
