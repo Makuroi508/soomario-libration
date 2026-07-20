@@ -1,0 +1,4 @@
+# backtest candle data (pulled locally, not code)
+backtest/candles/
+__pycache__/
+*.pyc
