@@ -120,9 +120,14 @@ class ExitManager:
         res = self.client.market_close(pos["coin"], pos["qty"], is_long, current_price=price)
         if res and res.get("filled"):
             sid = pos.get("hard_stop_id")
-            if sid is not None and str(sid).isdigit():
+            if sid:
+                # Clear any stale trigger. Propr order ids are URNs
+                # ('urn:prp-order:...'); HL's are ints. Gating on isdigit() alone
+                # would skip every Propr cancel and leave orphaned reduce-only
+                # stops resting against positions we've since reopened.
                 try:
-                    self.client.cancel_order(pos["coin"], int(sid))   # clear any stale trigger
+                    self.client.cancel_order(
+                        pos["coin"], int(sid) if str(sid).isdigit() else sid)
                 except (TypeError, ValueError):
                     pass
             fill = res.get("avg_price") or stop

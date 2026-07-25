@@ -214,10 +214,15 @@ def run_worker():
     logger.info(f"  LIBRATION WORKER STARTING — {config_summary()}")
     logger.info("═" * 60)
 
-    hl = HLClient()
+    if config.EXCHANGE == "propr":
+        from propr_client import ProprClient
+        hl = ProprClient()
+    else:
+        hl = HLClient()
     if not config.PAPER:
         if not hl.init_sdk():
-            logger.error("🛑 HL SDK init failed — worker will not start. Fix creds and redeploy.")
+            logger.error(f"🛑 {config.EXCHANGE} init failed — worker will not start. "
+                         f"Fix creds and redeploy.")
             return
         hl.asset_meta = build_asset_meta()
         logger.info(f"📐 asset_meta loaded for {len(hl.asset_meta)} symbols")

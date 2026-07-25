@@ -47,6 +47,20 @@ HL_PRIVATE_KEY     = os.getenv("HL_PRIVATE_KEY", "").strip()
 HL_IS_VAULT        = _b("HL_IS_VAULT")
 HL_API_URL         = "https://api.hyperliquid.xyz/info"
 
+# ─── Target exchange ────────────────────────────────────────────
+# "hyperliquid" (default — unchanged behaviour) or "propr". app.py builds the
+# matching client; everything downstream is venue-agnostic. Market data always
+# comes from HL's public info endpoint, since Propr settles on Hyperliquid and
+# exposes no candle/price endpoints of its own.
+EXCHANGE = os.getenv("EXCHANGE", "hyperliquid").strip().lower()
+
+# Propr — only read when EXCHANGE=propr. PROPR_ACCOUNT_ID is required and is
+# never auto-discovered: with more than one active challenge attempt, discovery
+# can silently route orders to the wrong funded account.
+PROPR_API_KEY    = os.getenv("PROPR_API_KEY", "").strip()
+PROPR_ACCOUNT_ID = os.getenv("PROPR_ACCOUNT_ID", "").strip()
+PROPR_ATTEMPT_ID = os.getenv("PROPR_ATTEMPT_ID", "").strip()
+
 # ─── Run modes ──────────────────────────────────────────────────
 # DRY_RUN  : SDK skips signing; reads still work; orders are simulated by hl_client.
 # PAPER    : the executor itself simulates fills against live prices and never
@@ -90,9 +104,14 @@ DAILY_DD_PCT  = _f("DAILY_DD_PCT", 5)    # halt new entries once down 5% on the 
 # ─── Sizing / leverage / concurrency ────────────────────────────
 LEVERAGE      = _f("LEVERAGE", 2)        # launch at 2x (no liquidation risk vs 10% stop)
 NOTIONAL_FRAC = _f("NOTIONAL_FRAC", 0.20)  # 20% of equity notional per position
-# Concurrency cap = leverage / notional_frac. 2x / 20% -> 10. This is the lever
+# Concurrency cap. Default = leverage / notional_frac (2x / 20% -> 10), the lever
 # that turns ~56% fill rate (1x) into ~85% (2x).
-MAX_CONCURRENT = int(LEVERAGE / NOTIONAL_FRAC + 1e-9)
+#
+# Overridable because a prop account has to decouple the two: at NOTIONAL_FRAC
+# 0.08 the formula yields 25, and 25 x 8% x 11.3% = 22.6% of equity if a
+# correlated cluster all hard-stops at once — instant breach of a 6% floor.
+# LEAVE UNSET on the Hyperliquid service to keep today's computed 10.
+MAX_CONCURRENT = _i("MAX_CONCURRENT", int(LEVERAGE / NOTIONAL_FRAC + 1e-9))
 
 # ─── Universe (volatile alt perps; main DEX only — no HIP-3) ────
 _DEFAULT_COINS = "SOL,AVAX,LINK,NEAR,ADA,DOGE,BCH,LTC,DOT,ATOM"
@@ -167,6 +186,7 @@ def is_cross_for(asset: str) -> bool:
 def summary() -> dict:
     return {
         "name": NAME,
+        "exchange": EXCHANGE,
         "coins": COINS,
         "watch": sorted(WATCH_SET),
         "watch_size_mult": WATCH_SIZE_MULT,
