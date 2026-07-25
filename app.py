@@ -228,7 +228,15 @@ def run_worker():
         if config.EXCHANGE == "propr" and hasattr(hl, "equity_breakdown"):
             logger.info(f"💰 equity components: {hl.equity_breakdown()}")
             if hasattr(hl, "challenge_rules"):
-                logger.info(f"📋 venue rules: {hl.challenge_rules()}")
+                _r = hl.challenge_rules()
+                logger.info(f"📋 venue rules: {_r}")
+                _vd, _vx = _r.get("daily_loss_pct"), _r.get("max_dd_pct")
+                if _vd and config.DAILY_DD_PCT >= _vd:
+                    logger.error(f"⚠️  DAILY_DD_PCT={config.DAILY_DD_PCT} is NOT tighter than the "
+                                 f"venue's {_vd}% daily limit — the guard would fire too late")
+                if _vx and config.MAX_DD_PCT and config.MAX_DD_PCT > _vx:
+                    logger.error(f"⚠️  MAX_DD_PCT={config.MAX_DD_PCT} exceeds the venue's {_vx}% "
+                                 f"— the guard floor sits BELOW the real breach point")
         logger.info(f"📐 asset_meta loaded for {len(hl.asset_meta)} symbols")
     db = DB()
     pm = PositionManager(hl, db)

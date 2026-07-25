@@ -14,6 +14,7 @@ Pyramiding 1: one position per coin. Every missed signal is logged with a
 reason — fill rate is a KPI (target ~85% at 2x).
 """
 import logging
+import time
 
 import config
 from utils import iso, utc_date_str, append_jsonl, tg_notify
@@ -245,6 +246,40 @@ class PositionManager:
                             last_reset=utc_date_str())
         logger.info(f"🔄 daily baseline reset to ${base:.2f}")
 
+    # ── venue rules (authoritative over env) ───────────────────
+    _RULES_TTL = 300
+
+    def venue_rules(self) -> dict:
+        """Limits as the VENUE states them. Cached briefly and refreshed, so a
+        phase transition (Propr moves the target 5% -> 10%) is picked up without
+        a redeploy, and an env typo can't loosen a guard below the real limit."""
+        now = time.time()
+        if getattr(self, "_rules_cache", None) and now - getattr(self, "_rules_ts", 0) < self._RULES_TTL:
+            return self._rules_cache
+        r = {}
+        if hasattr(self.client, "challenge_rules"):
+            try:
+                r = self.client.challenge_rules() or {}
+            except Exception as e:
+                logger.warning(f"venue rules unavailable ({e}) — falling back to env")
+        self._rules_cache, self._rules_ts = r, now
+        return r
+
+    def daily_limit_pct(self) -> float:
+        """Where the guard fires on the day. Never looser than the venue allows;
+        an explicitly tighter DAILY_DD_PCT still wins."""
+        venue = self.venue_rules().get("daily_loss_pct")
+        if venue:
+            return min(config.DAILY_DD_PCT, max(venue - config.DD_GUARD_MARGIN, 0.25))
+        return config.DAILY_DD_PCT
+
+    def dd_limit(self) -> tuple:
+        """(max_drawdown_pct, anchor_type) — venue first, env as fallback."""
+        r = self.venue_rules()
+        pct = r.get("max_dd_pct") or config.MAX_DD_PCT
+        typ = (r.get("dd_type") or config.DD_TYPE or "static").lower()
+        return pct, typ
+
     def _risk_equity(self) -> float:
         """The equity the daily guard measures against.
 
@@ -318,12 +353,13 @@ class PositionManager:
         Reconstructing an HWM locally is unsafe: if their mark caught a spike
         our 120s poll missed, our floor sits below theirs and we flatten only
         after they've already recorded the breach."""
-        if config.MAX_DD_PCT <= 0:
+        max_dd, dd_type = self.dd_limit()
+        if max_dd <= 0:
             return
         eq = self._risk_equity()
         if eq <= 0:
             return
-        if config.DD_TYPE == "trailing":
+        if dd_type == "trailing":
             hwm = None
             if hasattr(self.client, "high_water_mark"):
                 hwm = self.client.high_water_mark()
@@ -336,7 +372,7 @@ class PositionManager:
         if anchor <= 0:
             return
         # Flatten DD_GUARD_MARGIN points above the real floor.
-        effective = max(config.MAX_DD_PCT - config.DD_GUARD_MARGIN, 0.25)
+        effective = max(max_dd - config.DD_GUARD_MARGIN, 0.25)
         floor = anchor * (1 - effective / 100)
         if eq > floor:
             return
@@ -344,10 +380,10 @@ class PositionManager:
         if not self.db.daily_halt():
             self.db.set_account(daily_halt=1)
             logger.error(f"🚨 MAX DD GUARD: equity ${eq:.2f} <= floor ${floor:.2f} "
-                         f"({dd:.2f}% below {config.DD_TYPE} anchor ${anchor:.2f}; "
-                         f"venue limit {config.MAX_DD_PCT}%) — flattening and pausing")
-            tg_notify(f"🚨 *MAX DRAWDOWN GUARD* — {dd:.2f}% below the {config.DD_TYPE} "
-                      f"anchor (venue limit {config.MAX_DD_PCT}%).\n"
+                         f"({dd:.2f}% below {dd_type} anchor ${anchor:.2f}; "
+                         f"venue limit {max_dd}%) — flattening and pausing")
+            tg_notify(f"🚨 *MAX DRAWDOWN GUARD* — {dd:.2f}% below the {dd_type} "
+                      f"anchor (venue limit {max_dd}%).\n"
                       f"Flattening everything. This limit does NOT reset at midnight — "
                       f"set ENTRIES_ENABLED=0 and review before resuming.", level="warn")
         if self.db.open_positions():
@@ -362,14 +398,15 @@ class PositionManager:
         if base <= 0:
             return
         halted = bool(acct["daily_halt"])
+        limit = self.daily_limit_pct()
         dd = (base - self._risk_equity()) / base * 100
-        if not halted and dd >= config.DAILY_DD_PCT:
+        if not halted and dd >= limit:
             self.db.set_account(daily_halt=1)
             halted = True
             n = len(self.db.open_positions())
             tail = (f"; flattening {n} open position(s)" if config.DAILY_FLATTEN
                     else "; open positions ride their stops")
-            logger.warning(f"🛑 DAILY DD HALT: down {dd:.2f}% >= {config.DAILY_DD_PCT}% "
+            logger.warning(f"🛑 DAILY DD HALT: down {dd:.2f}% >= {limit:.2f}% "
                            f"— no new entries until UTC rollover{tail}")
             tg_notify(f"*DAILY DD HALT* — down {dd:.2f}% on the day.\n"
                       + (f"Flattening {n} open position(s), then paused until UTC rollover."
