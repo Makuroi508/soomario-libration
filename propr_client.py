@@ -248,14 +248,24 @@ class ProprClient:
         so this logs [shape:phase] and returns whatever it can resolve; the
         guard falls back to env config for anything missing."""
         a = self._attempt() or {}
-        phases = a.get("phases") or (a.get("challenge") or {}).get("phases") or []
-        if phases:
-            self._log_unmapped("phase", phases[0] if isinstance(phases[0], dict) else {})
+        ch = a.get("challenge") or {}
+        # The ATTEMPT's phases track progress (startingBalance, order, status).
+        # The RULES live on the CHALLENGE's phases. Join them on phaseId.
+        att_phases = [p for p in (a.get("phases") or []) if isinstance(p, dict)]
+        ch_phases = [p for p in (ch.get("phases") or []) if isinstance(p, dict)]
+        if att_phases:
+            self._log_unmapped("attempt_phase", att_phases[0])
+        if ch_phases:
+            self._log_unmapped("challenge_phase", ch_phases[0])
+        cur_att = next((p for p in att_phases
+                        if a.get("currentPhaseId") in (p.get("attemptPhaseId"),
+                                                       p.get("phaseId"), p.get("id"))), None)
+        cur_att = cur_att or (att_phases[0] if att_phases else {})
+        want = cur_att.get("phaseId")
+        cur = next((p for p in ch_phases
+                    if p.get("phaseId") == want or p.get("id") == want), None)
+        cur = cur or (ch_phases[0] if ch_phases else {})
         cur_id = a.get("currentPhaseId")
-        cur = next((p for p in phases if isinstance(p, dict)
-                    and cur_id in (p.get("phaseId"), p.get("id"),
-                                   p.get("challengeAttemptPhaseId"))), None)
-        cur = cur or (phases[0] if phases and isinstance(phases[0], dict) else {})
         def pick(*keys):
             for k in keys:
                 if cur.get(k) is not None:
@@ -267,6 +277,9 @@ class ProprClient:
             "max_dd_pct": pick("maxDrawdownPercent", "maxDrawdown", "drawdownPercent"),
             "dd_type": str(cur.get("drawdownType") or cur.get("maxDrawdownType") or "").lower(),
             "target_pct": pick("profitTargetPercent", "profitTarget", "targetPercent"),
+            "challenge": ch.get("name"),
+            "phases_total": len(ch_phases) or len(att_phases) or None,
+            "phase_order": cur_att.get("order"),
             "phase_id": cur_id,
         }
 
