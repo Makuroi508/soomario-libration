@@ -146,11 +146,25 @@ class ProprClient:
             return False
         a = mine[0]
         self._log_unmapped("attempt", a)
-        if not self.attempt_id:
-            self.attempt_id = a.get("attemptId") or a.get("id") or ""
-        self._initial_balance = _f(a.get("initialBalance"), 0) or None   # VERIFY
+        self._log_unmapped("attempt.account", a.get("account") or {})
+        self._log_unmapped("attempt.challenge", a.get("challenge") or {})
+        # ALWAYS take the id from the API. PROPR_ATTEMPT_ID is a convenience, not
+        # the source of truth: a challengeId pasted in by mistake looks valid but
+        # 404s on every equity read, which silently disables the daily guard.
+        discovered = a.get("attemptId") or a.get("id") or ""
+        if discovered and discovered != self.attempt_id:
+            if self.attempt_id:
+                logger.warning(f"PROPR_ATTEMPT_ID={self.attempt_id!r} does not match the "
+                               f"live attempt — using {discovered!r} instead")
+            self.attempt_id = discovered
+        acct = a.get("account") or {}
+        ch = a.get("challenge") or {}
+        self._initial_balance = _f(acct.get("initialBalance")
+                                   or ch.get("initialBalance")
+                                   or ch.get("accountSize"), 0) or None
         logger.info(f"✅ Propr account {self.account_id} | attempt {self.attempt_id} "
-                    f"| phase {a.get('currentPhase')} | initial ${self._initial_balance}")
+                    f"| status {a.get('status')} | phase {a.get('currentPhaseId')} "
+                    f"| initial ${self._initial_balance}")
 
         # app.py assigns asset_meta right after init_sdk(); seed it here too so
         # the client is usable standalone. build_asset_meta() reads HL's public meta.
@@ -172,32 +186,61 @@ class ProprClient:
         return self.hl.fetch_candles(symbol, interval, limit)
 
     # ── equity ──────────────────────────────────────────────────
+    def _attempt(self) -> Optional[dict]:
+        """The live attempt record. Falls back to resolving it from the active
+        list by accountId, so a wrong or stale PROPR_ATTEMPT_ID self-heals
+        instead of permanently zeroing out equity."""
+        if self.attempt_id:
+            d = self._req("GET", f"/challenge-attempts/{self.attempt_id}")
+            if d:
+                return d.get("data", d)
+            logger.warning(f"attempt {self.attempt_id!r} not found — re-resolving")
+        d = self._req("GET", "/challenge-attempts", params={"status": "active"})
+        for a in (d or {}).get("data", []):
+            if a.get("accountId") == self.account_id:
+                aid = a.get("attemptId") or a.get("id")
+                if aid and aid != self.attempt_id:
+                    logger.warning(f"attempt id corrected to {aid!r}")
+                    self.attempt_id = aid
+                return a
+        logger.error(f"no active attempt for account {self.account_id}")
+        return None
+
     def get_equity(self) -> float:
         """Equity per Propr's own challenge ledger — the same accounting that
         decides a breach. Do NOT reconstruct this from positions: if our number
         and Propr's disagree, theirs is the one that ends the challenge."""
-        if not self.attempt_id:
-            logger.error("no attempt_id; cannot read equity")
+        a = self._attempt()
+        if not a:
             return 0.0
-        d = self._req("GET", f"/challenge-attempts/{self.attempt_id}")
-        if not d:
-            return 0.0
-        a = d.get("data", d)
-        self._log_unmapped("equity", a)
-        for k in ("currentBalance", "equity", "accountValue", "balance"):   # VERIFY
-            if a.get(k) is not None:
-                return _f(a[k])
-        base = self._initial_balance or _f(a.get("initialBalance"))
-        pnl = _f(a.get("totalProfitLoss", a.get("totalPnl", a.get("netPnl"))))
-        return base + pnl
+        acct = a.get("account") or {}
+        self._log_unmapped("account", acct)
+        for k in ("equity", "balance", "currentBalance", "accountValue",
+                  "totalEquity", "netEquity", "currentEquity"):
+            if acct.get(k) is not None:
+                return _f(acct[k])
+        base = self._initial_balance or _f(acct.get("initialBalance"))
+        pnl = None
+        for k in ("totalProfitLoss", "totalPnl", "netPnl", "realizedPnl", "profitLoss"):
+            if acct.get(k) is not None or a.get(k) is not None:
+                pnl = _f(acct.get(k, a.get(k)))
+                break
+        if base and pnl is not None:
+            return base + pnl
+        logger.error("equity: no recognised balance field — see [shape:account] above")
+        return 0.0
 
     # ── positions ───────────────────────────────────────────────
     def _raw_positions(self) -> Optional[list]:
-        d = self._req("GET", f"/accounts/{self.account_id}/positions",
-                      params={"status": "open", "limit": 200})
+        # No query params: the server rejects status/limit with a bare 400.
+        # Filter client-side, which the docs recommend anyway for zero-qty rows.
+        d = self._req("GET", f"/accounts/{self.account_id}/positions")
         if d is None:
             return None                      # failed read != flat (Farms lesson)
-        return [p for p in d.get("data", []) if _f(p.get("quantity")) != 0]
+        rows = d.get("data", [])
+        return [p for p in rows
+                if _f(p.get("quantity")) != 0
+                and str(p.get("status", "open")).lower() == "open"]
 
     def get_positions(self):
         """HL-shaped dicts so position_manager needs no changes.
@@ -285,8 +328,9 @@ class ProprClient:
         fill = _f(res.get("averageFillPrice")) or px
         logger.info(f"✅ {asset} open {'long' if is_buy else 'short'} "
                     f"{size} @ ${fill:.6f} ({res.get('orderId')})")
-        return {"filled": True, "avg_price": fill, "size": size,
-                "oid": res.get("orderId"), "raw": res}
+        # key MUST be total_size — position_manager reads order["total_size"]
+        return {"filled": True, "avg_price": fill, "total_size": size,
+                "size": size, "oid": res.get("orderId"), "raw": res}
 
     def market_close(self, symbol: str, size: float, is_long: bool,
                      current_price: Optional[float] = None) -> Optional[dict]:
@@ -306,8 +350,8 @@ class ProprClient:
             return None
         fill = _f(res.get("averageFillPrice")) or current_price or self.get_price(short_name(symbol))
         logger.info(f"✅ {asset} closed {size} @ ${_f(fill):.6f}")
-        return {"filled": True, "avg_price": _f(fill), "size": size,
-                "oid": res.get("orderId"), "raw": res}
+        return {"filled": True, "avg_price": _f(fill), "total_size": size,
+                "size": size, "oid": res.get("orderId"), "raw": res}
 
     def place_stop_market(self, symbol: str, is_long: bool, size: float,
                           stop_px: float) -> Optional[str]:
