@@ -361,7 +361,10 @@ class ProprClient:
         body.setdefault("accountId", self.account_id)
         body.setdefault("exchange", "hyperliquid")
         body.setdefault("productType", "perp")
-        body.setdefault("timeInForce", "GTC")
+        # Reference SDK: IOC for market, GTC otherwise. We previously forced GTC
+        # on everything, which diverges from every working example.
+        body.setdefault("timeInForce", "IOC" if body.get("type") == "market" else "GTC")
+        body.setdefault("closePosition", False)
         d = self._req("POST", f"/accounts/{self.account_id}/orders",
                       json={"orders": [body]})
         if not d:
@@ -373,17 +376,32 @@ class ProprClient:
     # buy_long_or_sell_short). The intuitive mapping — "closing a long is a sell on
     # the long book" — is therefore invalid here. We try the accepted shapes in
     # order and cache whichever the API takes, so this costs one 400 per process.
-    _CLOSE_SHAPES = ("omit", "aligned")
+    # Reduce-only shape discovery.
+    #
+    # The docs' canonical stop is side=sell + positionSide=long on a long, but the
+    # live API rejected exactly that with 13096
+    # (order_side_must_align_with_position_side_BUY_LONG_or_SELL_SHORT). Omitting
+    # positionSide gives a bare 400, so the field is required. The literal reading
+    # of the error is that Propr wants buy<->long / sell<->short and lets
+    # reduceOnly do the reducing — so that shape is tried first.
+    #
+    # The docs are demonstrably wrong elsewhere (status/limit query params on
+    # /positions also 400), so we trust the error text over the documentation and
+    # verify empirically. Every shape is tried; the winner is cached.
+    _REDUCE_SHAPES = ("aligned", "docs", "omit")
 
     def _reduce_shapes(self, is_long: bool):
         side = "sell" if is_long else "buy"
-        for shape in ([self._close_shape] if self._close_shape else list(self._CLOSE_SHAPES)):
-            if shape == "omit":
-                yield shape, side, None            # let reduceOnly/positionId decide
-            else:
+        for shape in ([self._close_shape] if self._close_shape else list(self._REDUCE_SHAPES)):
+            if shape == "aligned":
                 yield shape, side, ("long" if side == "buy" else "short")
+            elif shape == "docs":
+                yield shape, side, ("long" if is_long else "short")
+            else:
+                yield shape, side, None
 
     def _reduce_order(self, base_body: dict, is_long: bool, what: str):
+        attempts = []
         for shape, side, pside in self._reduce_shapes(is_long):
             body = dict(base_body, side=side)
             if pside is not None:
@@ -393,12 +411,19 @@ class ProprClient:
             res = self._order(body)
             if res is not None:
                 if self._close_shape != shape:
-                    logger.info(f"    ↳ {what}: positionSide shape '{shape}' accepted — caching")
+                    logger.info(f"    ↳ {what}: shape '{shape}' "
+                                f"(side={side} positionSide={pside}) ACCEPTED — caching")
                     self._close_shape = shape
                 return res
-            code = (self.last_error or {}).get("code")
-            if code != 13096:
-                return None                        # a different failure: stop guessing
+            err = (self.last_error or {})
+            attempts.append(f"{shape}(side={side},positionSide={pside}) -> "
+                            f"{err.get('code', '?')} {err.get('message', '')[:60]}")
+            # Keep going regardless of the error code. Bailing early on a
+            # non-13096 response is what stopped the fallback from ever running.
+        import json as _json
+        logger.error(f"❌ {what}: every reduce-only shape rejected.\n"
+                     f"   attempts: {' | '.join(attempts)}\n"
+                     f"   last body sent: {_json.dumps(body)}")
         return None
 
     def _round(self, symbol: str, size: float) -> float:
