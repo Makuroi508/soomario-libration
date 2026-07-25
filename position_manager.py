@@ -240,20 +240,99 @@ class PositionManager:
             self.reset_daily_baseline()
 
     def reset_daily_baseline(self):
-        self.db.set_account(daily_baseline=self.equity(), daily_halt=0,
+        base = self._risk_equity()
+        self.db.set_account(daily_baseline=base, daily_halt=0,
                             last_reset=utc_date_str())
-        logger.info(f"🔄 daily baseline reset to ${self.equity():.2f}")
+        logger.info(f"🔄 daily baseline reset to ${base:.2f}")
 
-    def check_daily_dd(self):
+    def _risk_equity(self) -> float:
+        """The equity the daily guard measures against.
+
+        On a prop venue this MUST be the venue's own ledger. If our flow-neutral
+        number says we're down 1.4% while Propr's accounting says 3.1%, Propr's
+        is the one that ends the challenge — so the guard and the breach engine
+        have to read from the same source. Falls back to performance equity on
+        Hyperliquid, in PAPER, or if the venue read fails."""
+        if config.EXCHANGE == "propr" and not config.PAPER:
+            try:
+                eq = self.client.get_equity() or 0.0
+            except Exception as e:
+                logger.warning(f"guard: venue equity read failed ({e}) — using perf equity")
+                eq = 0.0
+            if eq > 0:
+                return eq
+            logger.warning("guard: venue equity unavailable — falling back to perf equity")
+        return self.equity()
+
+    def flatten_all(self, exit_manager=None, reason: str = "DAILY_GUARD") -> int:
+        """Close every open position now, clear its resting stop, and book it.
+
+        Idempotent and self-retrying: anything that fails to close stays in the
+        book and is retried on the next tick, so a transient API error can never
+        leave a position silently unmanaged behind a halt flag."""
+        em = exit_manager or getattr(self, "exit_manager", None)
+        open_pos = self.db.open_positions()
+        if not open_pos:
+            return 0
+        closed, failed = 0, []
+        for p in open_pos:
+            coin, is_long = p["coin"], p["side"] == "long"
+            px = self.client.get_price(coin) or p["entry"]
+            if config.PAPER:
+                fill = self._paper_fill_price(px, not is_long)
+            else:
+                res = self.client.market_close(coin, p["qty"], is_long, current_price=px)
+                if not (res and res.get("filled")):
+                    failed.append(coin)
+                    continue
+                fill = float(res.get("avg_price") or px)
+                # Close FIRST, then cancel the trigger — never leave the position
+                # naked in the window between the two calls.
+                sid = p.get("hard_stop_id")
+                if sid and str(sid) != "paper":
+                    try:
+                        self.client.cancel_order(
+                            coin, int(sid) if str(sid).isdigit() else sid)
+                    except (TypeError, ValueError):
+                        pass
+            if em is not None:
+                em.close_position(p, fill_px=fill, reason=reason, intended_exit=px)
+            else:
+                self.db.delete_position(coin)
+            closed += 1
+            logger.warning(f"🧯 {reason}: flattened {coin} {p['side']} "
+                           f"{p['qty']:.6f} @ ${fill:.6f}")
+        if failed:
+            logger.error(f"❌ {reason}: could not close {', '.join(failed)} "
+                         f"— will retry next tick")
+            tg_notify(f"⚠️ Guard flatten could NOT close: {', '.join(failed)}.\n"
+                      f"Retrying every tick — check the exchange manually.", level="warn")
+        return closed
+
+    def check_daily_dd(self, exit_manager=None):
+        """Halt new entries at DAILY_DD_PCT, and when DAILY_FLATTEN is on, close
+        the open book as well. Halting alone only stops digging; the positions
+        already open are what carry you into a breach."""
         acct = self.db.account()
         base = acct["daily_baseline"] or 0.0
         if base <= 0:
             return
-        dd = (base - self.equity()) / base * 100
-        if dd >= config.DAILY_DD_PCT and not acct["daily_halt"]:
+        halted = bool(acct["daily_halt"])
+        dd = (base - self._risk_equity()) / base * 100
+        if not halted and dd >= config.DAILY_DD_PCT:
             self.db.set_account(daily_halt=1)
+            halted = True
+            n = len(self.db.open_positions())
+            tail = (f"; flattening {n} open position(s)" if config.DAILY_FLATTEN
+                    else "; open positions ride their stops")
             logger.warning(f"🛑 DAILY DD HALT: down {dd:.2f}% >= {config.DAILY_DD_PCT}% "
-                           f"— no new entries until UTC rollover (open positions ride their stops)")
+                           f"— no new entries until UTC rollover{tail}")
             tg_notify(f"*DAILY DD HALT* — down {dd:.2f}% on the day.\n"
-                      f"No new entries until UTC rollover; open positions keep their stops.",
+                      + (f"Flattening {n} open position(s), then paused until UTC rollover."
+                         if config.DAILY_FLATTEN else
+                         "No new entries until UTC rollover; open positions keep their stops."),
                       level="warn")
+        # Runs every tick while halted, so a failed close is retried until the
+        # book is genuinely empty.
+        if halted and config.DAILY_FLATTEN and self.db.open_positions():
+            self.flatten_all(exit_manager, reason="DAILY_GUARD")
