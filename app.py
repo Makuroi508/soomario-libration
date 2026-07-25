@@ -57,6 +57,59 @@ except Exception as e:
     raise
 
 
+def _challenge_snapshot(pm, db):
+    """The three numbers that decide a prop challenge: progress to target, room
+    to today's floor, room to the PERMANENT floor. Mirrors the venue's own header
+    (used / allowed) so the two can be cross-checked at a glance — if they ever
+    disagree, the venue's ledger is the one that counts."""
+    if config.EXCHANGE != "propr":
+        return None
+    c = pm.client
+    try:
+        eq = pm._risk_equity()
+        rules = pm.venue_rules()
+        hwm = c.high_water_mark() if hasattr(c, "high_water_mark") else None
+    except Exception as e:                                   # never break the tick
+        logger.warning(f"challenge snapshot failed: {e}")
+        return None
+    if not eq or eq <= 0:
+        return None
+    acct = db.account()
+    init = getattr(c, "_initial_balance", None) or acct.get("inception") or eq
+    day_base = acct.get("daily_baseline") or eq
+    max_dd, dd_type = pm.dd_limit()
+    v_daily = rules.get("daily_loss_pct") or config.DAILY_DD_PCT
+    anchor = (hwm or init) if dd_type == "trailing" else init
+
+    daily_used = max(0.0, day_base - eq)
+    daily_allow = day_base * v_daily / 100
+    dd_used_pct = max(0.0, (anchor - eq) / anchor * 100) if anchor else 0.0
+    target = rules.get("target_pct")
+    prog = (eq - init) / init * 100 if init else 0.0
+    return {
+        "venue": "PROPR",
+        "name": rules.get("challenge"),
+        "phase": rules.get("phase_order"),
+        "phases_total": rules.get("phases_total"),
+        "venue_equity": round(eq, 2),
+        "initial": round(init, 2),
+        "hwm": round(hwm, 2) if hwm else None,
+        "target_pct": target,
+        "progress_pct": round(prog, 3),
+        "daily_used": round(daily_used, 2),
+        "daily_allowed": round(daily_allow, 2),
+        "daily_limit_pct": v_daily,
+        "daily_guard_pct": round(pm.daily_limit_pct(), 2),
+        "daily_floor": round(day_base * (1 - v_daily / 100), 2),
+        "dd_used_pct": round(dd_used_pct, 3),
+        "dd_limit_pct": max_dd,
+        "dd_type": dd_type,
+        "dd_anchor": round(anchor, 2) if anchor else None,
+        "dd_floor": round(anchor * (1 - max_dd / 100), 2) if anchor else None,
+        "dd_guard_floor": round(anchor * (1 - max(max_dd - config.DD_GUARD_MARGIN, 0.25) / 100), 2) if anchor else None,
+    }
+
+
 def _write_status(db, pm, equity, total_upnl, marks):
     positions = []
     for p in db.open_positions():
@@ -105,6 +158,7 @@ def _write_status(db, pm, equity, total_upnl, marks):
         "daily_halt": bool(acct["daily_halt"]),
         "daily_baseline": acct["daily_baseline"],
         "positions": positions,
+        "challenge": _challenge_snapshot(pm, db),
     })
 
 
