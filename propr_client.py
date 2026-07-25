@@ -215,20 +215,32 @@ class ProprClient:
             return 0.0
         acct = a.get("account") or {}
         self._log_unmapped("account", acct)
-        for k in ("equity", "balance", "currentBalance", "accountValue",
-                  "totalEquity", "netEquity", "currentEquity"):
+
+        # ORDER MATTERS. On Propr's account schema:
+        #   balance / crossWalletBalance = WALLET, excludes unrealised PnL
+        #   marginBalance               = wallet + unrealised = EQUITY
+        # Using `balance` would make the daily guard blind to open-position
+        # drawdown — it would sit flat while positions bled, which is exactly
+        # the failure the guard exists to prevent. Propr breaches on equity.
+        if acct.get("marginBalance") is not None:
+            return _f(acct["marginBalance"])
+        for k in ("equity", "currentEquity", "totalEquity", "accountValue"):
             if acct.get(k) is not None:
                 return _f(acct[k])
-        base = self._initial_balance or _f(acct.get("initialBalance"))
-        pnl = None
-        for k in ("totalProfitLoss", "totalPnl", "netPnl", "realizedPnl", "profitLoss"):
-            if acct.get(k) is not None or a.get(k) is not None:
-                pnl = _f(acct.get(k, a.get(k)))
-                break
-        if base and pnl is not None:
-            return base + pnl
+        wallet = acct.get("balance", acct.get("crossWalletBalance"))
+        if wallet is not None:
+            upnl = _f(acct.get("totalUnrealizedPnl", acct.get("crossUnrealizedPnl")))
+            return _f(wallet) + upnl
         logger.error("equity: no recognised balance field — see [shape:account] above")
         return 0.0
+
+    def equity_breakdown(self) -> dict:
+        """Diagnostic: the components behind get_equity(), for the boot log."""
+        a = self._attempt() or {}
+        acct = a.get("account") or {}
+        return {k: acct.get(k) for k in
+                ("marginBalance", "balance", "availableBalance", "crossWalletBalance",
+                 "totalUnrealizedPnl", "highWaterMark", "marginLevel")}
 
     # ── positions ───────────────────────────────────────────────
     def _raw_positions(self) -> Optional[list]:
@@ -274,11 +286,18 @@ class ProprClient:
     def _position_id(self, symbol: str, is_long: bool) -> Optional[str]:
         """Conditional orders need this. Only exists once the entry has filled."""
         target, want = short_name(symbol), "long" if is_long else "short"
-        for p in (self._raw_positions() or []):
-            if (short_name(str(p.get("asset", ""))) == target
-                    and str(p.get("positionSide", "")).lower() == want
-                    and _f(p.get("quantity")) != 0):
-                return p.get("positionId")
+        # The fill and the position record are not atomic. Retry briefly rather
+        # than fail the stop — maybe_enter() flattens on a missing stop, so a
+        # spurious miss costs a full round trip in fees.
+        for attempt in range(5):
+            for p in (self._raw_positions() or []):
+                if (short_name(str(p.get("asset", ""))) == target
+                        and str(p.get("positionSide", "")).lower() == want
+                        and _f(p.get("quantity")) != 0):
+                    return p.get("positionId")
+            if attempt < 4:
+                time.sleep(0.6)
+        logger.error(f"{target}: positionId never appeared after 5 tries (~3s)")
         return None
 
     # ── orders ──────────────────────────────────────────────────
