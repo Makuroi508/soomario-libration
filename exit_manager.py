@@ -49,6 +49,20 @@ class ExitManager:
         qty = pos["qty"]
         updates = {}
 
+        # A tracked position can exist with NO resting trigger: an adopted orphan,
+        # or an entry whose stop was rejected while the emergency close also failed.
+        # _live_stop_backstop is a 120s poll, not a substitute for an exchange-side
+        # trigger — retry attaching one every tick until it sticks.
+        if not config.PAPER and pos.get("hard_stop_id") is None and pos.get("hard_stop"):
+            sid = self.client.place_stop_market(coin, is_long, qty, pos["hard_stop"])
+            if sid:
+                updates["hard_stop_id"] = str(sid)
+                logger.info(f"    🛡 {coin} hard stop ATTACHED @ ${pos['hard_stop']:.6f} ({sid})")
+                tg_notify(f"🛡 {coin}: hard stop now resting on the exchange at "
+                          f"${pos['hard_stop']:.6f}.", level="info")
+            else:
+                logger.error(f"❌ {coin}: still UNPROTECTED — stop placement rejected again")
+
         # Track the favorable extreme: max price for long, min price for short.
         if is_long:
             peak = max(pos["peak"], price)

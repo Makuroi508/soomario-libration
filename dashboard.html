@@ -298,7 +298,7 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
       <div class="scard" id="scDD">
         <div class="hero-label">Daily Drawdown</div>
         <div class="scard-v" id="sDD">—</div>
-        <div class="hero-sub" id="sDDSub">halt at -5% / UTC day</div>
+        <div class="hero-sub" id="sDDSub">halt at -&mdash;% / UTC day</div>
       </div>
       <div class="scard">
         <div class="hero-label">Concurrency</div>
@@ -509,7 +509,8 @@ async function loadStatus(){
   sDD.className='scard-v '+(dPct>=0?'up':'down');
   const scDD=document.getElementById('scDD');
   if(s.daily_halt){ scDD.className='scard warn'; document.getElementById('sDDSub').textContent='HALTED — no new entries until UTC rollover'; }
-  else { scDD.className='scard'; document.getElementById('sDDSub').textContent='halt at -5% / UTC day'; }
+  else { scDD.className='scard'; document.getElementById('sDDSub').textContent=
+      'halt at -'+(d.config&&d.config.daily_dd_pct!=null?d.config.daily_dd_pct:'?')+'% / UTC day'; }
   const maxc=s.max_concurrent||10, opn=s.open_positions||0;
   document.getElementById('sConc').textContent=opn+' / '+maxc;
   document.getElementById('hGauge').innerHTML=Array.from({length:maxc},(_,i)=>`<i class="${i<opn?'f':''}"></i>`).join('');
