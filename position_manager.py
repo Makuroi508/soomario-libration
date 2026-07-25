@@ -309,6 +309,50 @@ class PositionManager:
                       f"Retrying every tick — check the exchange manually.", level="warn")
         return closed
 
+    def check_max_dd(self, exit_manager=None):
+        """The limit that actually ends a challenge. The daily guard resets at
+        UTC midnight; this one does not — breach it and the account is gone
+        permanently, so it flattens and stays flat until a human intervenes.
+
+        TRAILING anchors to the VENUE's high-water mark, read from the venue.
+        Reconstructing an HWM locally is unsafe: if their mark caught a spike
+        our 120s poll missed, our floor sits below theirs and we flatten only
+        after they've already recorded the breach."""
+        if config.MAX_DD_PCT <= 0:
+            return
+        eq = self._risk_equity()
+        if eq <= 0:
+            return
+        if config.DD_TYPE == "trailing":
+            hwm = None
+            if hasattr(self.client, "high_water_mark"):
+                hwm = self.client.high_water_mark()
+            if not hwm or hwm <= 0:
+                hwm = max(self.db.account().get("inception") or 0.0, eq)
+                logger.warning("max-dd: venue HWM unavailable — using local fallback")
+            anchor = hwm
+        else:
+            anchor = self.db.account().get("inception") or 0.0
+        if anchor <= 0:
+            return
+        # Flatten DD_GUARD_MARGIN points above the real floor.
+        effective = max(config.MAX_DD_PCT - config.DD_GUARD_MARGIN, 0.25)
+        floor = anchor * (1 - effective / 100)
+        if eq > floor:
+            return
+        dd = (anchor - eq) / anchor * 100
+        if not self.db.daily_halt():
+            self.db.set_account(daily_halt=1)
+            logger.error(f"🚨 MAX DD GUARD: equity ${eq:.2f} <= floor ${floor:.2f} "
+                         f"({dd:.2f}% below {config.DD_TYPE} anchor ${anchor:.2f}; "
+                         f"venue limit {config.MAX_DD_PCT}%) — flattening and pausing")
+            tg_notify(f"🚨 *MAX DRAWDOWN GUARD* — {dd:.2f}% below the {config.DD_TYPE} "
+                      f"anchor (venue limit {config.MAX_DD_PCT}%).\n"
+                      f"Flattening everything. This limit does NOT reset at midnight — "
+                      f"set ENTRIES_ENABLED=0 and review before resuming.", level="warn")
+        if self.db.open_positions():
+            self.flatten_all(exit_manager, reason="MAX_DD_GUARD")
+
     def check_daily_dd(self, exit_manager=None):
         """Halt new entries at DAILY_DD_PCT, and when DAILY_FLATTEN is on, close
         the open book as well. Halting alone only stops digging; the positions

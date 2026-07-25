@@ -227,6 +227,8 @@ def run_worker():
         hl.asset_meta = build_asset_meta()
         if config.EXCHANGE == "propr" and hasattr(hl, "equity_breakdown"):
             logger.info(f"💰 equity components: {hl.equity_breakdown()}")
+            if hasattr(hl, "challenge_rules"):
+                logger.info(f"📋 venue rules: {hl.challenge_rules()}")
         logger.info(f"📐 asset_meta loaded for {len(hl.asset_meta)} symbols")
     db = DB()
     pm = PositionManager(hl, db)
@@ -328,6 +330,7 @@ def tick(hl, db, pm, em, shadow):
     # ── shadow reap + daily-DD + snapshots ──
     open_coins = {p["coin"] for p in db.open_positions()}
     shadow.reap(open_coins, marks)
+    pm.check_max_dd(em)      # permanent limit first — it outranks the daily one
     pm.check_daily_dd(em)
     equity = pm.equity()
     total_upnl = 0.0

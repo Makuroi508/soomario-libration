@@ -234,6 +234,42 @@ class ProprClient:
         logger.error("equity: no recognised balance field — see [shape:account] above")
         return 0.0
 
+    def high_water_mark(self) -> Optional[float]:
+        """Propr's OWN high-water mark — the anchor its trailing drawdown uses.
+        Never reconstruct this locally: if our HWM lags theirs by a spike we
+        didn't sample, our floor sits below the real one and the guard fires
+        too late."""
+        a = self._attempt() or {}
+        hwm = (a.get("account") or {}).get("highWaterMark")
+        return _f(hwm) if hwm is not None else None
+
+    def challenge_rules(self) -> dict:
+        """Phase rules as Propr states them. Field names are still unconfirmed,
+        so this logs [shape:phase] and returns whatever it can resolve; the
+        guard falls back to env config for anything missing."""
+        a = self._attempt() or {}
+        phases = a.get("phases") or (a.get("challenge") or {}).get("phases") or []
+        if phases:
+            self._log_unmapped("phase", phases[0] if isinstance(phases[0], dict) else {})
+        cur_id = a.get("currentPhaseId")
+        cur = next((p for p in phases if isinstance(p, dict)
+                    and cur_id in (p.get("phaseId"), p.get("id"),
+                                   p.get("challengeAttemptPhaseId"))), None)
+        cur = cur or (phases[0] if phases and isinstance(phases[0], dict) else {})
+        def pick(*keys):
+            for k in keys:
+                if cur.get(k) is not None:
+                    return _f(cur[k])
+            return None
+        return {
+            "daily_loss_pct": pick("maxDailyLossPercent", "maxDailyLoss",
+                                   "dailyLossLimit", "dailyLossPercent"),
+            "max_dd_pct": pick("maxDrawdownPercent", "maxDrawdown", "drawdownPercent"),
+            "dd_type": str(cur.get("drawdownType") or cur.get("maxDrawdownType") or "").lower(),
+            "target_pct": pick("profitTargetPercent", "profitTarget", "targetPercent"),
+            "phase_id": cur_id,
+        }
+
     def equity_breakdown(self) -> dict:
         """Diagnostic: the components behind get_equity(), for the boot log."""
         a = self._attempt() or {}

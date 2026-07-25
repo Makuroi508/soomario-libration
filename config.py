@@ -100,6 +100,20 @@ SHORT_LEVEL   = _f("SHORT_LEVEL", 40)    # crossunder down -> short
 TRAIL_PCT     = _f("TRAIL_PCT", 0.55)    # activate +0.55%, trail 0.55% behind peak
 HARD_STOP_PCT = _f("HARD_STOP_PCT", 10)  # native resting trigger; never moved against
 DAILY_DD_PCT  = _f("DAILY_DD_PCT", 5)    # halt new entries once down 5% on the UTC day
+# Halting only stops digging — open positions keep bleeding toward the venue's
+# hard daily limit. On a prop account that is what ends the challenge, so the
+# guard must also FLATTEN. Default off: Hyperliquid has no breach rule and
+# flattening there would change the walk-forward-validated strategy.
+DAILY_FLATTEN = _b("DAILY_FLATTEN")      # 1 -> close the book at the halt, then pause
+
+# ─── Venue max-drawdown guard (prop accounts) ───────────────────
+# The limit that actually ends a challenge. STATIC anchors to the starting
+# balance; TRAILING anchors to the venue's high-water mark and ratchets up.
+# We flatten DD_GUARD_MARGIN points ABOVE the real floor so a gap can't take us
+# through it. 0 disables (Hyperliquid has no such rule).
+MAX_DD_PCT      = _f("MAX_DD_PCT", 0)              # e.g. 8 for a 2-Step
+DD_TYPE         = os.getenv("DD_TYPE", "static").strip().lower()   # static | trailing
+DD_GUARD_MARGIN = _f("DD_GUARD_MARGIN", 1.5)       # points of buffer
 
 # ─── Sizing / leverage / concurrency ────────────────────────────
 LEVERAGE      = _f("LEVERAGE", 2)        # launch at 2x (no liquidation risk vs 10% stop)
@@ -198,6 +212,7 @@ def summary() -> dict:
         "trail_pct": TRAIL_PCT,
         "hard_stop_pct": HARD_STOP_PCT,
         "daily_dd_pct": DAILY_DD_PCT,
+        "max_dd": f"{MAX_DD_PCT}% {DD_TYPE}" if MAX_DD_PCT else "off",
         "mode": "PAPER" if PAPER else ("DRY_RUN" if DRY_RUN else "LIVE"),
         "db": str(DB_PATH),
     }
