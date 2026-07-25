@@ -207,8 +207,21 @@ class PositionManager:
                 tg_notify(f"⚠️ {coin}: STOP FAILED to place after entry fill — "
                           f"flattening the position immediately (not riding unprotected).",
                           level="warn")
-                self.client.market_close(coin, qty, is_long, current_price=price)
-                self.db.log_miss(coin, signal, "stop_failed_flattened"); return None
+                closed = self.client.market_close(coin, qty, is_long, current_price=price)
+                if closed and closed.get("filled"):
+                    self.db.log_miss(coin, signal, "stop_failed_flattened")
+                    return None
+                # The flatten failed too, so the position is LIVE on the exchange.
+                # Dropping it here would make it invisible to exit_manager and to
+                # reconcile — an unmanaged, unstopped position nobody is watching.
+                # Persist it instead (stop_id stays None); manage() retries the stop
+                # each tick and the backstop can still close it.
+                logger.error(f"🚨 {coin}: flatten ALSO failed — position is LIVE and "
+                             f"UNPROTECTED. Recording it so it stays managed.")
+                tg_notify(f"🚨 *{coin}: OPEN WITHOUT A STOP* — entry filled, stop rejected, "
+                          f"and the emergency close also failed.\n"
+                          f"It is now tracked and the bot will retry the stop every tick, "
+                          f"but CHECK THE EXCHANGE.", level="warn")
 
         # ── persist + dashboard ENTRY event ──
         pos = dict(

@@ -106,6 +106,10 @@ DAILY_DD_PCT  = _f("DAILY_DD_PCT", 5)    # halt new entries once down 5% on the 
 # flattening there would change the walk-forward-validated strategy.
 DAILY_FLATTEN = _b("DAILY_FLATTEN")      # 1 -> close the book at the halt, then pause
 
+# Take over positions found on the exchange but missing from our book. Safe on a
+# dedicated bot account; leave OFF where you also trade manually.
+ADOPT_ORPHANS = _b("ADOPT_ORPHANS")
+
 # ─── Venue max-drawdown guard (prop accounts) ───────────────────
 # The limit that actually ends a challenge. STATIC anchors to the starting
 # balance; TRAILING anchors to the venue's high-water mark and ratchets up.

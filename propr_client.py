@@ -79,6 +79,8 @@ class ProprClient:
         self.attempt_id = os.getenv("PROPR_ATTEMPT_ID", "").strip()
         self.asset_meta = {}
         self.last_open_error = None
+        self.last_error = None
+        self._close_shape = None
         self._margin_cfg_ids = {}
         self._logged_shapes = set()
         self._initial_balance = None
@@ -117,6 +119,10 @@ class ProprClient:
                     return r.json()
                 if r.status_code == 400 and "/cancel" in path:
                     return {"_already_gone": True}      # filled/cancelled/expired
+                try:
+                    self.last_error = r.json()
+                except ValueError:
+                    self.last_error = {"message": r.text[:200]}
                 logger.error(f"{method} {path} -> {r.status_code} {r.text[:300]}")
                 return None
             except requests.RequestException as e:
@@ -363,6 +369,38 @@ class ProprClient:
         rows = d.get("data", [])
         return rows[0] if rows else None
 
+    # Propr rejects sell+long with 13096 (order_side_must_align_with_position_side_
+    # buy_long_or_sell_short). The intuitive mapping — "closing a long is a sell on
+    # the long book" — is therefore invalid here. We try the accepted shapes in
+    # order and cache whichever the API takes, so this costs one 400 per process.
+    _CLOSE_SHAPES = ("omit", "aligned")
+
+    def _reduce_shapes(self, is_long: bool):
+        side = "sell" if is_long else "buy"
+        for shape in ([self._close_shape] if self._close_shape else list(self._CLOSE_SHAPES)):
+            if shape == "omit":
+                yield shape, side, None            # let reduceOnly/positionId decide
+            else:
+                yield shape, side, ("long" if side == "buy" else "short")
+
+    def _reduce_order(self, base_body: dict, is_long: bool, what: str):
+        for shape, side, pside in self._reduce_shapes(is_long):
+            body = dict(base_body, side=side)
+            if pside is not None:
+                body["positionSide"] = pside
+            else:
+                body.pop("positionSide", None)
+            res = self._order(body)
+            if res is not None:
+                if self._close_shape != shape:
+                    logger.info(f"    ↳ {what}: positionSide shape '{shape}' accepted — caching")
+                    self._close_shape = shape
+                return res
+            code = (self.last_error or {}).get("code")
+            if code != 13096:
+                return None                        # a different failure: stop guessing
+        return None
+
     def _round(self, symbol: str, size: float) -> float:
         from hl_client import round_size
         return round_size(self.asset_meta, hl_symbol(short_name(symbol)), size)
@@ -407,13 +445,11 @@ class ProprClient:
         if size <= 0:
             logger.warning(f"⚠️  {asset}: close size rounded to 0")
             return None
-        res = self._order({
-            "type": "market", "side": "sell" if is_long else "buy",
-            "positionSide": "long" if is_long else "short",   # the side being CLOSED
-            "asset": asset, "base": asset, "quote": "USDC",
+        res = self._reduce_order({
+            "type": "market", "asset": asset, "base": asset, "quote": "USDC",
             "quantity": str(size),
             "reduceOnly": True, "closePosition": True,        # never flips
-        })
+        }, is_long, f"close {asset}")
         if not res:
             return None
         fill = _f(res.get("averageFillPrice")) or current_price or self.get_price(short_name(symbol))
@@ -435,13 +471,11 @@ class ProprClient:
                          f"(13056 CONDITIONAL_ORDER_REQUIRES_POSITION_OR_GROUP)")
             return None
         trigger = self._round_px(symbol, stop_px)
-        res = self._order({
+        res = self._reduce_order({
             "positionId": pid, "type": "stop_market",
-            "side": "sell" if is_long else "buy",
-            "positionSide": "long" if is_long else "short",
             "asset": asset, "base": asset, "quote": "USDC",
             "quantity": str(size), "triggerPrice": str(trigger), "reduceOnly": True,
-        })
+        }, is_long, f"stop {asset}")
         if not res:
             return None
         oid = res.get("orderId")

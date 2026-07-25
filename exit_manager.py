@@ -37,6 +37,7 @@ class ExitManager:
         self.db = db
         self.pm = position_manager  # for paper realized-equity bookkeeping
         self._gone_streak = {}      # coin -> consecutive 'absent w/o fill' reconcile passes
+        self._orphan_warned = {}    # coin -> qty we've already alarmed about
 
     # ── per-position trailing management ───────────────────────
     def manage(self, pos: dict, price: float):
@@ -240,6 +241,51 @@ class ExitManager:
         fee = sum(float(f.get("fee", 0) or 0) for f in closes)
         return avg_px, fee
 
+    def _check_orphans(self, live, open_db):
+        """Positions the EXCHANGE has that our book does not.
+
+        reconcile() was one-directional: it books DB positions that vanished, but
+        never noticed the reverse. An entry that fills while the stop is rejected
+        leaves exactly that state — live size, no stop, and nothing watching it.
+        Alert always; adopt only when ADOPT_ORPHANS=1, since on a personal account
+        an unknown position may simply be a manual trade."""
+        known = {p["coin"].upper() for p in open_db}
+        for p in live:
+            coin = short_name(str(p.get("coin", p.get("symbol", "")))).upper()
+            if not coin or coin in known:
+                continue
+            try:
+                szi = float(p.get("szi") or 0)
+                entry = float(p.get("entryPx") or 0)
+            except (TypeError, ValueError):
+                continue
+            if szi == 0 or entry <= 0:
+                continue
+            is_long = szi > 0
+            qty = abs(szi)
+            if not config.ADOPT_ORPHANS:
+                if self._orphan_warned.get(coin) != qty:
+                    self._orphan_warned[coin] = qty
+                    logger.error(f"🚨 ORPHAN: {coin} {'long' if is_long else 'short'} {qty} "
+                                 f"@ ${entry:.6f} is open on the exchange but NOT in our book "
+                                 f"— unmanaged and unstopped. Set ADOPT_ORPHANS=1 or close it.")
+                    tg_notify(f"🚨 *ORPHAN POSITION* — {coin} {'long' if is_long else 'short'} "
+                              f"{qty} @ ${entry:.6f} is live on the exchange but the bot is not "
+                              f"tracking it. Nothing is managing its risk.", level="warn")
+                continue
+            stop_px = entry * (1 - config.HARD_STOP_PCT / 100) if is_long \
+                else entry * (1 + config.HARD_STOP_PCT / 100)
+            self.db.insert_position(dict(
+                coin=coin, side="long" if is_long else "short", entry=entry, qty=qty,
+                notional=qty * entry, margin=qty * entry / max(config.LEVERAGE, 1),
+                peak=entry, hard_stop=stop_px, hard_stop_id=None, trail_active=0,
+                trail_stop=None, intended_entry=entry, opened_at=iso()))
+            logger.error(f"🚑 ADOPTED orphan {coin} {'long' if is_long else 'short'} {qty} "
+                         f"@ ${entry:.6f} — hard stop ${stop_px:.6f} will be placed next tick")
+            tg_notify(f"🚑 *ADOPTED* {coin} {'long' if is_long else 'short'} {qty} @ "
+                      f"${entry:.6f}\nIt was open on the exchange but untracked. Now managed; "
+                      f"stop goes on at the next tick.", level="warn")
+
     # ── live reconcile — exchange is source of truth ───────────
     def reconcile(self):
         """LIVE: book a position closed when the exchange confirms it's gone.
@@ -257,6 +303,7 @@ class ExitManager:
             logger.warning("reconcile: exchange read failed — skipping this pass.")
             return
         open_db = self.db.open_positions()
+        self._check_orphans(live, open_db)
         if not open_db:
             return
         live_coins = {short_name(str(p.get("coin", p.get("symbol", "")))).upper() for p in live}
