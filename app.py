@@ -352,6 +352,29 @@ _INTERVAL_MS = {
 }
 
 
+# Tick-line throttle. At POLL_SECONDS=45 an unthrottled heartbeat is ~1900
+# lines/day per service, which buries the lines that matter (entries, exits,
+# guard trips) and makes the log unusable for diagnosis a day later. Log when
+# something actually changed, and otherwise keep a periodic heartbeat so a
+# silent worker is still distinguishable from a healthy idle one.
+TICK_LOG_EVERY_SEC = int(os.getenv("TICK_LOG_EVERY_SEC", "600"))    # heartbeat floor
+TICK_LOG_EQ_DELTA  = float(os.getenv("TICK_LOG_EQ_DELTA", "0.25"))  # $ move worth a line
+_tick_last = {"ts": 0.0, "eq": None, "open": None}
+
+
+def _log_tick(equity, total_upnl, n_open, max_conc):
+    now = time.time()
+    changed = (_tick_last["open"] != n_open
+               or _tick_last["eq"] is None
+               or abs(equity - _tick_last["eq"]) >= TICK_LOG_EQ_DELTA)
+    due = (now - _tick_last["ts"]) >= TICK_LOG_EVERY_SEC
+    if not (changed or due):
+        return
+    _tick_last.update(ts=now, eq=equity, open=n_open)
+    logger.info(f"tick done — equity ${equity:.2f} upnl ${total_upnl:+.2f} "
+                f"open {n_open}/{max_conc}")
+
+
 def tick(hl, db, pm, em, shadow):
     pm.maybe_reset_daily()
     now_ms = int(__import__("time").time() * 1000)
@@ -445,8 +468,7 @@ def tick(hl, db, pm, em, shadow):
             total_upnl += move * p["qty"]
     db.snapshot_equity(equity, extra={"total_upnl": round(total_upnl, 4)})
     _write_status(db, pm, equity, total_upnl, marks)
-    logger.info(f"tick done — equity ${equity:.2f} upnl ${total_upnl:+.2f} "
-                f"open {len(db.open_positions())}/{pm.max_concurrent}")
+    _log_tick(equity, total_upnl, len(db.open_positions()), pm.max_concurrent)
 
 
 def main():

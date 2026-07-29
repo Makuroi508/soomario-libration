@@ -192,7 +192,16 @@ class ExitManager:
         updates["trail_stop"] = new_stop
         if new_oid:
             updates["hard_stop_id"] = str(new_oid)
-        logger.info(f"    ↗ trail stop {pos['coin']} -> ${new_stop:.6f}")
+        # Only log when the printed value actually changes. On low-priced coins
+        # (ENA ~$0.08, kPEPE ~$0.003) a 0.55% band ratchets by amounts invisible
+        # at 6dp, so every tick emitted an identical-looking line. The move still
+        # happens -- this only suppresses the duplicate log.
+        shown = f"${new_stop:.6f}"
+        if getattr(self, "_last_trail_shown", {}).get(pos["coin"]) != shown:
+            if not hasattr(self, "_last_trail_shown"):
+                self._last_trail_shown = {}
+            self._last_trail_shown[pos["coin"]] = shown
+            logger.info(f"    ↗ trail stop {pos['coin']} -> {shown}")
 
     def _paper_check_stop(self, pos, price):
         is_long = pos["side"] == "long"
