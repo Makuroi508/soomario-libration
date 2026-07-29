@@ -572,7 +572,9 @@ function renderChallenge(c){
   const du=c.daily_used||0, da=c.daily_allowed||0, dpc=da?du/da*100:0;
   set('chalDaily','chalDailyBar','chalDailySub', dpc,
       '$'+du.toFixed(2)+' / $'+da.toFixed(2),
-      'guard flattens at -'+c.daily_guard_pct+'% · venue limit '+c.daily_limit_pct+'%');
+      'guard flattens at -'+c.daily_guard_pct+'% · '+
+      (c.daily_is_venue ? ('venue limit '+c.daily_limit_pct+'%')
+                        : ('self-imposed '+c.daily_limit_pct+'% · no venue daily rule')));
   document.getElementById('scDaily').className='scard'+(dpc>=60?' warn':'');
   // drawdown used — the PERMANENT one
   const xu=c.dd_used_pct||0, xl=c.dd_limit_pct||0, xpc=xl?xu/xl*100:0;

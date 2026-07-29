@@ -78,7 +78,13 @@ def _challenge_snapshot(pm, db):
     init = getattr(c, "_initial_balance", None) or acct.get("inception") or eq
     day_base = acct.get("daily_baseline") or eq
     max_dd, dd_type = pm.dd_limit()
-    v_daily = rules.get("daily_loss_pct") or config.DAILY_DD_PCT
+    # Foxify imposes NO daily loss rule -- max drawdown is the only thing that
+    # ends the account. Falling back to config here is right (we still want a
+    # self-imposed daily brake), but the dashboard must not present it as a
+    # venue limit, or a future decision gets made against a rule that does not
+    # exist. daily_is_venue says which it is.
+    venue_daily = rules.get("daily_loss_pct")
+    v_daily = venue_daily or config.DAILY_DD_PCT
     anchor = (hwm or init) if dd_type == "trailing" else init
 
     daily_used = max(0.0, day_base - eq)
@@ -87,7 +93,8 @@ def _challenge_snapshot(pm, db):
     target = rules.get("target_pct")
     prog = (eq - init) / init * 100 if init else 0.0
     return {
-        "venue": "PROPR",
+        "venue": config.EXCHANGE.upper(),
+        "daily_is_venue": bool(venue_daily),
         "name": rules.get("challenge"),
         "phase": rules.get("phase_order"),
         "phases_total": rules.get("phases_total"),
