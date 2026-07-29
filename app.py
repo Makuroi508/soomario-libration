@@ -57,6 +57,59 @@ except Exception as e:
     raise
 
 
+def _challenge_snapshot(pm, db):
+    """The three numbers that decide a prop challenge: progress to target, room
+    to today's floor, room to the PERMANENT floor. Mirrors the venue's own header
+    (used / allowed) so the two can be cross-checked at a glance — if they ever
+    disagree, the venue's ledger is the one that counts."""
+    if config.EXCHANGE != "propr":
+        return None
+    c = pm.client
+    try:
+        eq = pm._risk_equity()
+        rules = pm.venue_rules()
+        hwm = c.high_water_mark() if hasattr(c, "high_water_mark") else None
+    except Exception as e:                                   # never break the tick
+        logger.warning(f"challenge snapshot failed: {e}")
+        return None
+    if not eq or eq <= 0:
+        return None
+    acct = db.account()
+    init = getattr(c, "_initial_balance", None) or acct.get("inception") or eq
+    day_base = acct.get("daily_baseline") or eq
+    max_dd, dd_type = pm.dd_limit()
+    v_daily = rules.get("daily_loss_pct") or config.DAILY_DD_PCT
+    anchor = (hwm or init) if dd_type == "trailing" else init
+
+    daily_used = max(0.0, day_base - eq)
+    daily_allow = day_base * v_daily / 100
+    dd_used_pct = max(0.0, (anchor - eq) / anchor * 100) if anchor else 0.0
+    target = rules.get("target_pct")
+    prog = (eq - init) / init * 100 if init else 0.0
+    return {
+        "venue": "PROPR",
+        "name": rules.get("challenge"),
+        "phase": rules.get("phase_order"),
+        "phases_total": rules.get("phases_total"),
+        "venue_equity": round(eq, 2),
+        "initial": round(init, 2),
+        "hwm": round(hwm, 2) if hwm else None,
+        "target_pct": target,
+        "progress_pct": round(prog, 3),
+        "daily_used": round(daily_used, 2),
+        "daily_allowed": round(daily_allow, 2),
+        "daily_limit_pct": v_daily,
+        "daily_guard_pct": round(pm.daily_limit_pct(), 2),
+        "daily_floor": round(day_base * (1 - v_daily / 100), 2),
+        "dd_used_pct": round(dd_used_pct, 3),
+        "dd_limit_pct": max_dd,
+        "dd_type": dd_type,
+        "dd_anchor": round(anchor, 2) if anchor else None,
+        "dd_floor": round(anchor * (1 - max_dd / 100), 2) if anchor else None,
+        "dd_guard_floor": round(anchor * (1 - max(max_dd - config.DD_GUARD_MARGIN, 0.25) / 100), 2) if anchor else None,
+    }
+
+
 def _write_status(db, pm, equity, total_upnl, marks):
     positions = []
     for p in db.open_positions():
@@ -105,6 +158,7 @@ def _write_status(db, pm, equity, total_upnl, marks):
         "daily_halt": bool(acct["daily_halt"]),
         "daily_baseline": acct["daily_baseline"],
         "positions": positions,
+        "challenge": _challenge_snapshot(pm, db),
     })
 
 
@@ -214,12 +268,29 @@ def run_worker():
     logger.info(f"  LIBRATION WORKER STARTING — {config_summary()}")
     logger.info("═" * 60)
 
-    hl = HLClient()
+    if config.EXCHANGE == "propr":
+        from propr_client import ProprClient
+        hl = ProprClient()
+    else:
+        hl = HLClient()
     if not config.PAPER:
         if not hl.init_sdk():
-            logger.error("🛑 HL SDK init failed — worker will not start. Fix creds and redeploy.")
+            logger.error(f"🛑 {config.EXCHANGE} init failed — worker will not start. "
+                         f"Fix creds and redeploy.")
             return
         hl.asset_meta = build_asset_meta()
+        if config.EXCHANGE == "propr" and hasattr(hl, "equity_breakdown"):
+            logger.info(f"💰 equity components: {hl.equity_breakdown()}")
+            if hasattr(hl, "challenge_rules"):
+                _r = hl.challenge_rules()
+                logger.info(f"📋 venue rules: {_r}")
+                _vd, _vx = _r.get("daily_loss_pct"), _r.get("max_dd_pct")
+                if _vd and config.DAILY_DD_PCT >= _vd:
+                    logger.error(f"⚠️  DAILY_DD_PCT={config.DAILY_DD_PCT} is NOT tighter than the "
+                                 f"venue's {_vd}% daily limit — the guard would fire too late")
+                if _vx and config.MAX_DD_PCT and config.MAX_DD_PCT > _vx:
+                    logger.error(f"⚠️  MAX_DD_PCT={config.MAX_DD_PCT} exceeds the venue's {_vx}% "
+                                 f"— the guard floor sits BELOW the real breach point")
         logger.info(f"📐 asset_meta loaded for {len(hl.asset_meta)} symbols")
     db = DB()
     pm = PositionManager(hl, db)
@@ -321,7 +392,8 @@ def tick(hl, db, pm, em, shadow):
     # ── shadow reap + daily-DD + snapshots ──
     open_coins = {p["coin"] for p in db.open_positions()}
     shadow.reap(open_coins, marks)
-    pm.check_daily_dd()
+    pm.check_max_dd(em)      # permanent limit first — it outranks the daily one
+    pm.check_daily_dd(em)
     equity = pm.equity()
     total_upnl = 0.0
     for p in db.open_positions():

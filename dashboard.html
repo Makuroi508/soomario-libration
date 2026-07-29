@@ -228,6 +228,11 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
   .ov-right{position:static}
   .poslist{max-height:none}
 }
+  .meter{height:6px;border-radius:4px;background:rgba(255,255,255,.07);margin:8px 0 6px;overflow:hidden}
+  .meter i{display:block;height:100%;width:0;border-radius:4px;transition:width .4s ease}
+  .meter i.ok{background:linear-gradient(90deg,#2ecc8f,#7ee8c0)}
+  .meter i.warn{background:linear-gradient(90deg,#e8b64c,#f2d489)}
+  .meter i.bad{background:linear-gradient(90deg,#e5544b,#ff8b83)}
 </style>
 </head>
 <body>
@@ -298,12 +303,38 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
       <div class="scard" id="scDD">
         <div class="hero-label">Daily Drawdown</div>
         <div class="scard-v" id="sDD">—</div>
-        <div class="hero-sub" id="sDDSub">halt at -5% / UTC day</div>
+        <div class="hero-sub" id="sDDSub">halt at -&mdash;% / UTC day</div>
       </div>
       <div class="scard">
         <div class="hero-label">Concurrency</div>
         <div class="scard-v" id="sConc">—</div>
         <div class="gauge" id="hGauge" style="margin-top:8px"></div>
+      </div>
+    </div>
+
+    <!-- prop challenge panel (hidden unless EXCHANGE=propr) -->
+    <div class="crd" id="chalCard" style="display:none;margin-bottom:18px">
+      <div class="crd-h">Challenge <span class="crd-tag live" id="chalVenue">PROPR</span>
+        <span class="crd-sub" id="chalSub">—</span></div>
+      <div class="srow" style="margin:0">
+        <div class="scard" id="scTgt">
+          <div class="hero-label">Profit Target</div>
+          <div class="scard-v" id="chalTgt">—</div>
+          <div class="meter"><i id="chalTgtBar" class="ok"></i></div>
+          <div class="hero-sub" id="chalTgtSub">—</div>
+        </div>
+        <div class="scard" id="scDaily">
+          <div class="hero-label">Daily Loss Used</div>
+          <div class="scard-v" id="chalDaily">—</div>
+          <div class="meter"><i id="chalDailyBar" class="warn"></i></div>
+          <div class="hero-sub" id="chalDailySub">—</div>
+        </div>
+        <div class="scard" id="scDrw">
+          <div class="hero-label">Drawdown Used</div>
+          <div class="scard-v" id="chalDD">—</div>
+          <div class="meter"><i id="chalDDBar" class="bad"></i></div>
+          <div class="hero-sub" id="chalDDSub">—</div>
+        </div>
       </div>
     </div>
 
@@ -509,12 +540,47 @@ async function loadStatus(){
   sDD.className='scard-v '+(dPct>=0?'up':'down');
   const scDD=document.getElementById('scDD');
   if(s.daily_halt){ scDD.className='scard warn'; document.getElementById('sDDSub').textContent='HALTED — no new entries until UTC rollover'; }
-  else { scDD.className='scard'; document.getElementById('sDDSub').textContent='halt at -5% / UTC day'; }
+  else { scDD.className='scard'; document.getElementById('sDDSub').textContent=
+      'halt at -'+(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')+'% / UTC day'; }
   const maxc=s.max_concurrent||10, opn=s.open_positions||0;
   document.getElementById('sConc').textContent=opn+' / '+maxc;
   document.getElementById('hGauge').innerHTML=Array.from({length:maxc},(_,i)=>`<i class="${i<opn?'f':''}"></i>`).join('');
 
+  renderChallenge(s.challenge);
   renderOverviewPositions(s.positions||[]);
+}
+function renderChallenge(c){
+  const card=document.getElementById('chalCard');
+  if(!c){ card.style.display='none'; return; }
+  card.style.display='';
+  document.getElementById('chalVenue').textContent=c.venue||'PROPR';
+  document.getElementById('chalSub').textContent=
+    (c.name||'challenge')+(c.phase?(' · step '+c.phase+(c.phases_total?'/'+c.phases_total:'')):'')+
+    ' · venue equity $'+(c.venue_equity!=null?c.venue_equity.toLocaleString():'—');
+  const set=(id,bar,sub,pct,txt,subtxt)=>{
+    document.getElementById(id).textContent=txt;
+    document.getElementById(bar).style.width=Math.max(0,Math.min(100,pct))+'%';
+    document.getElementById(sub).textContent=subtxt;
+  };
+  // progress to target
+  const tp=c.target_pct||0, pr=c.progress_pct||0;
+  set('chalTgt','chalTgtBar','chalTgtSub', tp?pr/tp*100:0,
+      fmtPct(pr)+' / '+tp+'%',
+      tp?('$'+(c.initial*(1+tp/100)-c.venue_equity).toFixed(2)+' to go'):'—');
+  document.getElementById('chalTgt').className='scard-v '+(pr>=0?'up':'down');
+  // daily loss used — mirrors the venue's own header
+  const du=c.daily_used||0, da=c.daily_allowed||0, dpc=da?du/da*100:0;
+  set('chalDaily','chalDailyBar','chalDailySub', dpc,
+      '$'+du.toFixed(2)+' / $'+da.toFixed(2),
+      'guard flattens at -'+c.daily_guard_pct+'% · venue limit '+c.daily_limit_pct+'%');
+  document.getElementById('scDaily').className='scard'+(dpc>=60?' warn':'');
+  // drawdown used — the PERMANENT one
+  const xu=c.dd_used_pct||0, xl=c.dd_limit_pct||0, xpc=xl?xu/xl*100:0;
+  set('chalDD','chalDDBar','chalDDSub', xpc,
+      xu.toFixed(2)+'% / '+xl+'%',
+      c.dd_type+' · anchor $'+(c.dd_anchor!=null?c.dd_anchor.toLocaleString():'—')+
+      ' · breach $'+(c.dd_floor!=null?c.dd_floor.toLocaleString():'—'));
+  document.getElementById('scDrw').className='scard'+(xpc>=60?' warn':'');
 }
 if(typeof window!=='undefined'){ window.CFG = window.CFG || {trail_pct:0.55, hard_stop_pct:10}; }
 
