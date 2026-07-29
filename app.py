@@ -281,7 +281,9 @@ def run_worker():
             logger.error(f"🛑 {config.EXCHANGE} init failed — worker will not start. "
                          f"Fix creds and redeploy.")
             return
-        hl.asset_meta = build_asset_meta()
+        # ProprClient/FoxifyClient already seed this in init_sdk(); rebuilding
+        # here doubles the meta fan-out at boot for no gain.
+        hl.asset_meta = getattr(hl, "asset_meta", None) or build_asset_meta()
         if config.EXCHANGE in ("propr", "foxify") and hasattr(hl, "equity_breakdown"):
             logger.info(f"💰 equity components: {hl.equity_breakdown()}")
             if hasattr(hl, "challenge_rules"):
@@ -335,6 +337,14 @@ def run_worker():
             time.sleep(POLL_SECONDS)
 
 
+# Bar length in ms, for gating the candle pull to the bar boundary (see tick()).
+_INTERVAL_MS = {
+    "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+    "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
+}
+
+
 def tick(hl, db, pm, em, shadow):
     pm.maybe_reset_daily()
     now_ms = int(__import__("time").time() * 1000)
@@ -347,8 +357,30 @@ def tick(hl, db, pm, em, shadow):
     marks = hl.get_all_prices(extra=open_coins) or {}
 
     # ── entries: evaluate the RSI cross only on a freshly closed 4h bar ──
+    #
+    # The candle pull is GATED on the bar boundary. RSI is computed from closed
+    # bars only, so between two 4h closes there is no new information — pulling
+    # 200 candles per coin every tick just to re-read the same timestamp was the
+    # single largest source of Hyperliquid rate-limit pressure, and with several
+    # services sharing one egress IP it is what produces the 429s that zero out
+    # the universe screen (every coin reads vol $0.0M and nothing can trade).
+    #
+    # At 20 coins and POLL_SECONDS=45 the old path was ~27 candle calls/minute
+    # per service. Gated, it is 20 calls per 4h bar — a >300x reduction — and
+    # the entry logic is bit-identical because a mid-bar fetch could never have
+    # produced a new signal anyway.
+    _bar_ms = _INTERVAL_MS.get(config.RSI_TF, 4 * 3_600_000)
+    _expect_last_close = (now_ms // _bar_ms) * _bar_ms - _bar_ms
+
     for coin in config.COINS:
         try:
+            _st = db.get_rsi_state(coin)
+            _seen = int(_st["last_closed_4h_ts"]) if _st and _st.get("last_closed_4h_ts") else None
+            # Already hold the newest closed bar for this coin → nothing to learn.
+            # Open positions are unaffected: trailing and the stop backstop run
+            # off get_all_prices() above, which still polls every tick.
+            if _seen is not None and _seen >= _expect_last_close:
+                continue
             candles = hl.fetch_candles(coin, config.RSI_TF, config.CANDLE_LIMIT)
             closed = signals.closed_candles(candles, now_ms)
             if len(closed) < config.RSI_LEN + 2:
