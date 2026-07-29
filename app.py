@@ -62,7 +62,7 @@ def _challenge_snapshot(pm, db):
     to today's floor, room to the PERMANENT floor. Mirrors the venue's own header
     (used / allowed) so the two can be cross-checked at a glance — if they ever
     disagree, the venue's ledger is the one that counts."""
-    if config.EXCHANGE != "propr":
+    if config.EXCHANGE not in ("propr", "foxify"):
         return None
     c = pm.client
     try:
@@ -271,6 +271,9 @@ def run_worker():
     if config.EXCHANGE == "propr":
         from propr_client import ProprClient
         hl = ProprClient()
+    elif config.EXCHANGE == "foxify":
+        from foxify_client import FoxifyClient
+        hl = FoxifyClient()
     else:
         hl = HLClient()
     if not config.PAPER:
@@ -279,7 +282,7 @@ def run_worker():
                          f"Fix creds and redeploy.")
             return
         hl.asset_meta = build_asset_meta()
-        if config.EXCHANGE == "propr" and hasattr(hl, "equity_breakdown"):
+        if config.EXCHANGE in ("propr", "foxify") and hasattr(hl, "equity_breakdown"):
             logger.info(f"💰 equity components: {hl.equity_breakdown()}")
             if hasattr(hl, "challenge_rules"):
                 _r = hl.challenge_rules()

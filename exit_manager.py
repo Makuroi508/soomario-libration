@@ -130,8 +130,15 @@ class ExitManager:
         # close is reported by the normal CLOSE notification below — no need to
         # alarm on every exit. We only escalate to Telegram if the close can't
         # be confirmed (a position may still be open — that IS worth a ping).
-        logger.warning(f"🛟 {pos['coin']} ${price:.6f} crossed stop ${stop:.6f} but still open "
-                       f"— forcing reduce-only market close (resting trigger missing/failed)")
+        if config.EXCHANGE == "foxify":
+            # On Kitsune there is no ratcheting exchange stop: the native `sl`
+            # parks at the hard stop and never moves, so this backstop IS the
+            # trail exit. Expected on most closes — logging it as a warning
+            # would bury the ones that matter.
+            logger.info(f"    ↘ {pos['coin']} trail exit ${price:.6f} (stop ${stop:.6f})")
+        else:
+            logger.warning(f"🛟 {pos['coin']} ${price:.6f} crossed stop ${stop:.6f} but still open "
+                           f"— forcing reduce-only market close (resting trigger missing/failed)")
         res = self.client.market_close(pos["coin"], pos["qty"], is_long, current_price=price)
         if res and res.get("filled"):
             sid = pos.get("hard_stop_id")

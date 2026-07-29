@@ -54,6 +54,19 @@ HL_API_URL         = "https://api.hyperliquid.xyz/info"
 # exposes no candle/price endpoints of its own.
 EXCHANGE = os.getenv("EXCHANGE", "hyperliquid").strip().lower()
 
+# Foxify / Kitsune — only read when EXCHANGE=foxify. The signal account IS the
+# funded account; there is no account-id indirection to get wrong. Kitsune is a
+# signal relay: no order ids, no standalone stops, no trailing. The native `sl`
+# rides with the entry as the disaster backstop; the 0.55% trail stays
+# bot-managed and exits through market_close().
+FOXIFY_API_BASE        = os.getenv("FOXIFY_API_BASE", "https://kitsunedev.foxify.trade/api").strip()
+FOXIFY_SIGNAL_ID       = os.getenv("FOXIFY_SIGNAL_ID", "").strip()
+FOXIFY_PASSPHRASE      = os.getenv("FOXIFY_PASSPHRASE", "").strip()
+FOXIFY_LEVERAGE        = float(os.getenv("FOXIFY_LEVERAGE", "2") or 2)
+FOXIFY_MAX_DD_PCT      = float(os.getenv("FOXIFY_MAX_DD_PCT", "20") or 20)
+FOXIFY_MIN_NOTIONAL    = float(os.getenv("FOXIFY_MIN_NOTIONAL", "10") or 10)
+FOXIFY_EQUITY_ADD_UPNL = os.getenv("FOXIFY_EQUITY_ADD_UPNL", "0").strip() in ("1", "true", "yes")
+
 # Propr — only read when EXCHANGE=propr. PROPR_ACCOUNT_ID is required and is
 # never auto-discovered: with more than one active challenge attempt, discovery
 # can silently route orders to the wrong funded account.

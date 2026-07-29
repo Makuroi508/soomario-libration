@@ -301,7 +301,7 @@ class PositionManager:
         is the one that ends the challenge — so the guard and the breach engine
         have to read from the same source. Falls back to performance equity on
         Hyperliquid, in PAPER, or if the venue read fails."""
-        if config.EXCHANGE == "propr" and not config.PAPER:
+        if config.EXCHANGE in ("propr", "foxify") and not config.PAPER:
             try:
                 eq = self.client.get_equity() or 0.0
             except Exception as e:
