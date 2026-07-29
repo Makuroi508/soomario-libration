@@ -56,6 +56,29 @@ BASE = os.getenv("FOXIFY_API_BASE", "https://kitsunedev.foxify.trade/api").rstri
 _TIMEOUT = 15
 
 
+def _base_symbol(raw) -> str:
+    """Extract the base coin from whatever Kitsune returns.
+
+    The docs example shows "BTC-USDC", but the live API returns Orderly's
+    native form: PERP_HYPE_USDC. Getting this wrong is silent and severe --
+    get_positions() stops matching positions to coins, so the bot reads flat
+    while holding risk: no trail, no stop backstop, and free to re-enter a coin
+    it is already in. Handle every shape rather than trusting either doc.
+    """
+    s = str(raw or "").strip().upper()
+    if not s:
+        return ""
+    if "_" in s:
+        parts = [p for p in s.split("_") if p]
+        if len(parts) >= 3:      # PERP_HYPE_USDC -> HYPE
+            return parts[1]
+        if len(parts) == 2:      # HYPE_USDC -> HYPE
+            return parts[0]
+    if "-" in s:                 # HYPE-USDC -> HYPE
+        return s.split("-", 1)[0]
+    return s                     # HYPE
+
+
 def _f(v, default=0.0) -> float:
     try:
         return float(v)
@@ -261,7 +284,7 @@ class FoxifyClient:
             qty = usd / entry
             is_long = str(p.get("direction", "")).lower() == "long"
             out.append({
-                "coin": short_name(str(p.get("symbol", "")).split("-")[0]),
+                "coin": _base_symbol(p.get("symbol")),
                 "szi": qty if is_long else -qty,
                 "entryPx": entry,
                 "unrealizedPnl": p.get("unrealizedPnl"),
@@ -278,6 +301,27 @@ class FoxifyClient:
         return None
 
     # ── orders ──────────────────────────────────────────────────
+    def _await_fill(self, asset: str, timeout: float = 8.0, interval: float = 1.5):
+        """Kitsune executes ASYNCHRONOUSLY.
+
+        /signals/trade returns {accepted: true, async: true, requestId: ...} --
+        that means QUEUED, not filled, and the response carries no fill price.
+        There is also a /signals/trade-status endpoint that is absent from the
+        published docs, so it is deliberately not relied on here; polling
+        /signals/positions uses a shape we have verified live.
+
+        Bounded on purpose: with 10 concurrent entries a long wait would stall
+        the whole tick. On timeout the caller still books the entry and the
+        normal reconcile path corrects the fill, exactly as it does on Propr.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(interval)
+            for p in (self.get_positions() or []):
+                if p.get("coin") == asset:
+                    return p
+        return None
+
     def market_open(self, symbol: str, is_buy: bool, notional_usd: float,
                     current_price: Optional[float] = None) -> Optional[dict]:
         """Open with the hard stop attached in the same payload.
@@ -311,14 +355,22 @@ class FoxifyClient:
             self.last_open_error = self.last_error or "trade rejected"
             return None
 
-        # Kitsune does not return a fill price. Mark price at send is the best
-        # estimate available; the authoritative entry arrives on the next
-        # /signals/positions read and reconciliation will correct it.
-        size = self._round(symbol, notional_usd / px)
-        logger.info(f"✅ {asset} open {'long' if is_buy else 'short'} "
-                    f"${notional_usd:.2f} (~{size}) @ ~${px:.6f}")
-        return {"filled": True, "avg_price": px, "total_size": size,
-                "size": size, "oid": None, "raw": res}
+        # The trade was QUEUED, not filled. Wait briefly for the position so the
+        # caller gets a real entry price and size instead of a pre-trade guess --
+        # the stop and the trail are both computed from this number.
+        filled = self._await_fill(asset)
+        if filled:
+            fill_px = _f(filled.get("entryPx")) or px
+            size = abs(_f(filled.get("szi"))) or self._round(symbol, notional_usd / px)
+            logger.info(f"✅ {asset} open {'long' if is_buy else 'short'} "
+                        f"{size} @ ${fill_px:.6f} (req ${notional_usd:.2f})")
+        else:
+            fill_px = px
+            size = self._round(symbol, notional_usd / px)
+            logger.warning(f"⚠️  {asset} open accepted but no position after "
+                           f"8s — booking at mark ${px:.6f}; reconcile will correct")
+        return {"filled": True, "avg_price": fill_px, "total_size": size,
+                "size": size, "oid": res.get("requestId"), "raw": res}
 
     def market_close(self, symbol: str, size: float, is_long: bool,
                      current_price: Optional[float] = None) -> Optional[dict]:
