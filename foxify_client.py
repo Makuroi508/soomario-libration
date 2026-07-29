@@ -56,6 +56,32 @@ BASE = os.getenv("FOXIFY_API_BASE", "https://kitsunedev.foxify.trade/api").rstri
 _TIMEOUT = 15
 
 
+def _parse_aliases(raw: str) -> dict:
+    """FOXIFY_SYMBOL_ALIASES="KPEPE:1000PEPE,JTO:PERP_JTO_USDC_mythos" -> dict."""
+    out = {}
+    for pair in (raw or "").split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        k, v = pair.split(":", 1)
+        k, v = k.strip().upper(), v.strip()
+        if k and v:
+            out[k] = v
+    return out
+
+
+# Internal coin name -> the symbol Kitsune/Orderly actually lists.
+#
+# Only needed where the venue's listing differs from the bot's internal name.
+# Sizing is unaffected: we always send USD notional and let Kitsune derive the
+# token quantity, so a 1000x-denominated listing needs no arithmetic — and in
+# this case none is even implied, because Hyperliquid's kPEPE and Orderly's
+# 1000PEPE quote the same unit (both ~$0.00274 per 1000 PEPE).
+_SEND_ALIAS_DEFAULT = {
+    "KPEPE": "1000PEPE",       # HL: kPEPE | Orderly: PERP_1000PEPE_USDC
+}
+
+
 def _base_symbol(raw) -> str:
     """Extract the base coin from whatever Kitsune returns.
 
@@ -99,6 +125,18 @@ class FoxifyClient:
         # whether currentBalance includes unrealised PnL; this is the escape
         # hatch if it turns out it does not.
         self.add_upnl = os.getenv("FOXIFY_EQUITY_ADD_UPNL", "0").strip() in ("1", "true", "yes")
+
+        # Symbol translation, both directions. Env entries override/extend the
+        # defaults so a listing change never needs a code deploy.
+        self.send_alias = dict(_SEND_ALIAS_DEFAULT)
+        self.send_alias.update(_parse_aliases(os.getenv("FOXIFY_SYMBOL_ALIASES", "")))
+        # Invert through _base_symbol so whatever comes back on /signals/positions
+        # resolves to the internal name: PERP_1000PEPE_USDC -> 1000PEPE -> KPEPE.
+        self.recv_alias = {}
+        for internal, listed in self.send_alias.items():
+            self.recv_alias[_base_symbol(listed)] = internal
+        if self.send_alias:
+            logger.info(f"Foxify symbol aliases: {self.send_alias}")
 
         self.asset_meta = {}
         self.last_open_error = None
@@ -259,6 +297,16 @@ class FoxifyClient:
         from hl_client import round_size
         return round_size(self.asset_meta, hl_symbol(short_name(symbol)), size)
 
+    def _send_symbol(self, coin: str) -> str:
+        """Internal coin name -> what we put on the wire."""
+        c = short_name(coin)
+        return self.send_alias.get(c, c)
+
+    def _recv_symbol(self, raw) -> str:
+        """What came back -> internal coin name."""
+        b = _base_symbol(raw)
+        return self.recv_alias.get(b, b)
+
     def get_positions(self):
         """HL-shaped dicts so position_manager needs no changes.
 
@@ -284,7 +332,7 @@ class FoxifyClient:
             qty = usd / entry
             is_long = str(p.get("direction", "")).lower() == "long"
             out.append({
-                "coin": _base_symbol(p.get("symbol")),
+                "coin": self._recv_symbol(p.get("symbol")),
                 "szi": qty if is_long else -qty,
                 "entryPx": entry,
                 "unrealizedPnl": p.get("unrealizedPnl"),
@@ -301,6 +349,46 @@ class FoxifyClient:
         return None
 
     # ── orders ──────────────────────────────────────────────────
+    def _trade_status(self, request_id: str, timeout: float = 10.0, interval: float = 1.0):
+        """Poll /signals/trade-status until the request reaches a terminal state.
+
+        This endpoint is absent from the published gist but is the only way to
+        learn that an ACCEPTED trade actually failed. Observed shape:
+
+            {requestId, signalId, symbol, action, status: "failed",
+             error: "All VAs failed: VA Soomario1: Internal error",
+             results: [{vaId, vaName, success: false, statusCode: 500}]}
+
+        Without this, a rejected order looks identical to a successful one --
+        {accepted: true} either way -- and the bot books a position that does
+        not exist, then trails and stop-manages nothing until reconcile
+        eventually writes a fabricated PnL into the ledger.
+
+        Returns (True | False | None, detail). None means unknown: the request
+        may still be in flight, so the caller should fall back to reading
+        /signals/positions rather than assuming either outcome.
+        """
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            d = self._post("/signals/trade-status", {"requestId": request_id})
+            if d:
+                last = d
+                st = str(d.get("status", "")).strip().lower()
+                if st in ("failed", "error", "rejected", "cancelled", "canceled"):
+                    detail = str(d.get("error") or st)
+                    # Surface the per-VA reason when present; it carries the
+                    # HTTP status that distinguishes a bad symbol from a crash.
+                    for r in (d.get("results") or []):
+                        if not r.get("success"):
+                            detail += f" [va={r.get('vaName')} code={r.get('statusCode')}]"
+                            break
+                    return False, detail
+                if st in ("completed", "complete", "success", "succeeded", "filled", "done", "executed"):
+                    return True, st
+            time.sleep(interval)
+        return None, f"status poll timed out (last={str((last or {}).get('status', '?'))})"
+
     def _await_fill(self, asset: str, timeout: float = 8.0, interval: float = 1.5):
         """Kitsune executes ASYNCHRONOUSLY.
 
@@ -331,7 +419,8 @@ class FoxifyClient:
         the position is never unprotected, even for the moment between fill and
         stop placement that the Propr path has to defend against.
         """
-        asset = short_name(symbol)
+        asset = short_name(symbol)          # internal name, e.g. KPEPE
+        wire = self._send_symbol(asset)     # what Orderly lists, e.g. 1000PEPE
         px = current_price if (current_price or 0) > 0 else (self.get_price(asset) or 0)
         if px <= 0:
             self.last_open_error = "no price"
@@ -343,7 +432,7 @@ class FoxifyClient:
             return None
 
         res = self._post("/signals/trade", {
-            "symbol": asset,
+            "symbol": wire,
             "action": "buy" if is_buy else "sell",
             "size": round(notional_usd, 2),      # explicit USD notional — never a percentage
             "leverage": self.leverage,
@@ -355,9 +444,21 @@ class FoxifyClient:
             self.last_open_error = self.last_error or "trade rejected"
             return None
 
-        # The trade was QUEUED, not filled. Wait briefly for the position so the
-        # caller gets a real entry price and size instead of a pre-trade guess --
-        # the stop and the trail are both computed from this number.
+        # The trade was QUEUED, not filled. Confirm it actually executed before
+        # the caller writes anything to the DB: a confirmed failure must return
+        # None so no phantom position is booked.
+        rid = res.get("requestId")
+        if rid:
+            ok, detail = self._trade_status(rid)
+            if ok is False:
+                self.last_open_error = f"execution failed: {detail}"
+                logger.error(f"❌ {asset} ({wire}) rejected downstream: {detail}")
+                return None
+            if ok is None:
+                logger.warning(f"⚠️  {asset}: {detail} — verifying via positions")
+
+        # Read back the real entry price and size; the stop and the trail are
+        # both computed from this number, so a pre-trade guess is not good enough.
         filled = self._await_fill(asset)
         if filled:
             fill_px = _f(filled.get("entryPx")) or px
@@ -381,6 +482,7 @@ class FoxifyClient:
         auto-detection, so a stale position read can never flip us short.
         """
         asset = short_name(symbol)
+        wire = self._send_symbol(asset)
         px = current_price if (current_price or 0) > 0 else (self.get_price(asset) or 0)
         if px <= 0:
             logger.warning(f"⚠️  {asset}: no price — cannot size the close")
@@ -391,13 +493,22 @@ class FoxifyClient:
             return None
 
         res = self._post("/signals/trade", {
-            "symbol": asset,
+            "symbol": wire,
             "action": "sell" if is_long else "buy",
             "size": round(notional, 2),
             "reduceOnly": True,
         })
         if not res:
             return None
+        rid = res.get("requestId")
+        if rid:
+            ok, detail = self._trade_status(rid)
+            if ok is False:
+                # Returning None leaves the position open in the DB, which is
+                # correct: it IS still open, and the next tick retries. Claiming
+                # a close here would strand real exposure the bot no longer tracks.
+                logger.error(f"❌ {asset} ({wire}) close rejected: {detail}")
+                return None
         logger.info(f"✅ {asset} closed ${notional:.2f} (~{size}) @ ~${px:.6f}")
         return {"filled": True, "avg_price": px, "total_size": size,
                 "size": size, "oid": None, "raw": res}
