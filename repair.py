@@ -322,6 +322,20 @@ def report(db, client, apply=False):
         print("Nothing to change.\n")
         return
 
+    # HARD GUARD. The equity re-anchor below computes inception from
+    # get_equity(), which on Propr is marginBalance = wallet + UNREALISED.
+    # Applying with positions open would fold their floating PnL permanently
+    # into the baseline and silently corrupt every future return figure.
+    # Reporting is always safe; only the write needs a flat book.
+    open_now = db.open_positions()
+    if open_now:
+        print(f"✗ REFUSING TO APPLY — {len(open_now)} position(s) still open: "
+              f"{', '.join(p['coin'] for p in open_now)}.")
+        print("  Venue equity includes their unrealised PnL, which would be baked")
+        print("  into inception and skew every return from here on.")
+        print("  Re-run when the book is flat (the report above is unaffected).\n")
+        return
+
     bak = f"{db.path}.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.bak"
     shutil.copy2(db.path, bak)
     print(f"→ backup written: {bak}")
