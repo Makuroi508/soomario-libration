@@ -1,39 +1,41 @@
 """
 Soomario Libration — Ledger repair (one-shot, operator-run)
 ═══════════════════════════════════════════════════════════
-Reconciles the local trade ledger against the VENUE's own trade history and
-equity, then rebuilds the dashboard curve from the corrected ledger.
+Rebuilds the local trade ledger from the VENUE's own fills, then rebuilds the
+dashboard curve from it.
 
 WHY THIS EXISTS
 On Propr, get_user_fills() sent `?limit=200` to /accounts/{id}/trades. That
-endpoint rejects any query string with a bare 400 — the same quirk /positions
-already documents. So the call failed on every attempt, silently: reconcile()
-read "the fill never indexed" instead of "the fills endpoint is broken", and
-fell through to its stop-estimate path. Consequences in the 25-29 Jul run:
+endpoint rejects any query string it doesn't know with a bare 400 — the same
+quirk /positions already documents. The call failed on every attempt, silently:
+reconcile() read "the fill never indexed" instead of "the fills endpoint is
+broken", and fell through to its stop-estimate path. Consequences:
 
-  • 42 of 45 closes booked at an ESTIMATE, not a real fill
-  • fee = 0.00 on every trade (0.075%/side never charged → ~$50 unaccounted)
+  • every close booked at an ESTIMATE, never a real fill
+  • fee = 0.00 on every trade (0.045%/side never charged, ~$34 unaccounted)
   • friction_pct — the entire go/no-go metric — measured nothing
-  • 8 positions that never armed a trail booked at exactly -10.00%, the hard
-    stop, while the observed market return was between +0.37% and -5.93%
+  • positions that never armed a trail booked at exactly the hard stop, -10%,
+    while the observed market return was between +0.37% and -5.93%
 
-Net effect: the ledger showed -$465.74 realized while Propr's ledger showed
--$138.95. The dashboard was reporting a loss roughly 3.3x the real one.
+Local ledger: -$477.72. Propr's own dashboard: -$77.15.
 
-USAGE (run with the same env as the service, so it can reach the venue and the
-volume; on Railway this is a one-off shell on the service):
+HOW THE REBUILD WORKS
+Fills are grouped by positionId — the venue's position lifecycle id — so each
+group is exactly one round trip with its true entry, exit, fees and realized
+PnL. An earlier version matched booked trades to fills by time and size; that
+mis-paired badly (a local BCH *long* matched the fills that closed the BCH
+*short* before it on the same coin) and produced +$80 against a truth of -$75.
+positionId grouping reproduces the venue total to the cent.
 
-    python repair.py --inspect     # dump the raw /trades payload. DO THIS FIRST.
-    python repair.py --report      # reconcile and print what would change
-    python repair.py --apply       # write the corrections + rebuild the curve
+USAGE — set RECONCILE_LEDGER on the service and redeploy; it runs at boot,
+because the SQLite file lives on the Railway volume:
 
---inspect exists because no one has ever seen this payload: get_user_fills()
-never returned a row, so its field mapping (executedAt / price / quantity /
-fee / realizedPnl / positionSide / type) is inferred from prose, not observed.
-Verify the names against --inspect output before trusting --report.
+    RECONCILE_LEDGER=inspect   dump the raw /trades payload + paging probe
+    RECONCILE_LEDGER=report    print what would change, write nothing
+    RECONCILE_LEDGER=apply     commit it (backs the DB up first)
 
-Nothing is written without --apply. A timestamped .bak copy of the DB is taken
-before the first write.
+Remove the env var after one run. Locally, `python repair.py --inspect` works
+for the read-only probes; --report/--apply need the service's volume.
 """
 from __future__ import annotations
 
@@ -47,12 +49,9 @@ import config
 from db import DB
 from utils import iso
 
-# How far from a local trade's closed_at a venue fill may sit and still be
-# considered the same close. Generous: reconcile only books after an 8-tick
-# debounce (~15 min), and the fabricated rows were booked ~14 min after entry.
-MATCH_WINDOW = timedelta(hours=3)
-# Size agreement required to call it the same close.
-SIZE_TOL = 0.02
+# Reuse the old ledger's exit_reason for a rebuilt trade when the same coin
+# closed within this window — keeps TRAIL/HARD_STOP labels on the dashboard.
+REASON_WINDOW = timedelta(hours=3)
 
 
 def _client():
@@ -80,8 +79,6 @@ def _ts(v):
 
 
 # ── paging discovery ────────────────────────────────────────────
-# Candidate query params, tried one at a time. `limit` is known to 400 — it is
-# included so the output shows the contrast rather than assuming it.
 _PAGE_PROBES = [
     {"limit": 100}, {"pageSize": 100}, {"page_size": 100}, {"perPage": 100},
     {"per_page": 100}, {"size": 100}, {"count": 100}, {"take": 100},
@@ -94,7 +91,8 @@ _PAGE_PROBES = [
 
 def _probe_paging(client):
     """Report which query params /trades accepts. Empirical, because the docs
-    are demonstrably wrong about this endpoint (limit -> bare 400)."""
+    are demonstrably wrong about this endpoint (limit=200 -> bare 400) and
+    several params are silently IGNORED rather than rejected."""
     import requests
     from propr_client import BASE
     url = f"{BASE}/accounts/{client.account_id}/trades"
@@ -119,25 +117,23 @@ def _probe_paging(client):
                 rows = r.json().get("data", [])
                 times = sorted(str(x.get("executedAt") or "") for x in rows)
                 span = f"  {times[0][:16]}..{times[-1][:16]}" if times else ""
-                mark = " ★ MORE" if base_n is not None and len(rows) > base_n else ""
+                mark = " * MORE" if base_n is not None and len(rows) > base_n else ""
                 print(f"  {label:<38} -> 200  {len(rows):>4} row(s){span}{mark}")
             except ValueError:
                 print(f"  {label:<38} -> 200  (non-JSON)")
         else:
-            msg = ""
             try:
                 msg = str(r.json().get("message", ""))[:50]
             except ValueError:
                 msg = r.text[:50]
             print(f"  {label:<38} -> {r.status_code}  {msg}")
-    print("  ★ = returned more than the default page; use that param to page.\n")
+    print("  * = returned more than the default page; use that param to page.\n")
 
 
 # ── --inspect ───────────────────────────────────────────────────
 def inspect(client):
     """Dump the raw venue trade payload so the field mapping can be verified."""
     if not hasattr(client, "_req") or not getattr(client, "account_id", None):
-        # Only Propr has the unverified mapping this is here to check.
         rows = client.get_user_fills()
         print(f"{config.EXCHANGE}: get_user_fills() returned {len(rows)} row(s)")
         for r in rows[:5]:
@@ -145,16 +141,10 @@ def inspect(client):
         return
     raw = client._req("GET", f"/accounts/{client.account_id}/trades")
     if raw is None:
-        print("✗ /trades returned no data. If this is a 400, the endpoint is "
-              "still being sent query params somewhere.")
+        print("x /trades returned no data.")
         return
     rows = raw.get("data", raw if isinstance(raw, list) else [])
-    print(f"✓ /trades returned {len(rows)} row(s)")
-
-    # The default page is small (10 observed) and covers only the last few
-    # hours, so a historical repair needs paging. Nothing is documented and
-    # `limit` 400s, so probe: show the envelope, then try candidate params and
-    # report which the server actually accepts.
+    print(f"/trades returned {len(rows)} row(s)")
     if isinstance(raw, dict):
         env = {k: v for k, v in raw.items() if k != "data"}
         print(f"\nenvelope (non-data keys): {json.dumps(env, indent=2, default=str)[:800]}")
@@ -162,174 +152,141 @@ def inspect(client):
         times = sorted(str(r.get("executedAt") or "") for r in rows)
         print(f"span: {times[0]} .. {times[-1]}")
     _probe_paging(client)
-
     if not rows:
         return
     print(f"\nkeys: {sorted(rows[0].keys())}\n")
-    for r in rows[:5]:
+    for r in rows[:3]:
         print(json.dumps(r, indent=2, default=str))
-    mapped = client.get_user_fills()
-    print(f"\nget_user_fills() mapped {len(mapped)} row(s)")
-    closes = [f for f in mapped if str(f.get("dir", "")).startswith("Close")]
-    print(f"  of which closing fills: {len(closes)}")
-    if mapped and not closes:
-        print("  ⚠ no row mapped to a Close — check the `type` values above "
-              "against the ('reduce','close','liquidation') test in get_user_fills().")
 
 
-# ── reconciliation ──────────────────────────────────────────────
-def _venue_closes(client):
-    """Closing fills grouped by coin, newest first."""
-    by_coin = {}
-    for f in client.get_user_fills():
-        if not str(f.get("dir", "")).startswith("Close"):
-            continue
-        coin = str(f.get("coin", "")).upper()
-        if coin:
-            by_coin.setdefault(coin, []).append(f)
-    for v in by_coin.values():
-        v.sort(key=lambda f: _ts(f.get("time")) or datetime.min.replace(tzinfo=timezone.utc),
-               reverse=True)
-    return by_coin
+# ── venue truth ─────────────────────────────────────────────────
+def venue_positions(client):
+    """Reconstruct true round trips from the venue's own fills.
 
-
-def _match(trade, fills):
-    """Find the venue fill(s) that closed this local trade.
-
-    Fills are grouped by orderId FIRST. One logical close routinely arrives as
-    several trade rows sharing an order (0.493 + 1.196 + 1.779 for a single
-    3.468 BCH close), so comparing individual rows against the booked quantity
-    finds nothing and would condemn a perfectly real trade as fabricated.
-    Returns (avg_px, fee, realized_pnl, n_fills) or None.
+    Grouped by positionId, so each group is exactly one round trip: its opening
+    fills, its closing fills, its fees and its realized PnL. Returns
+    (closed, open_, totals), closed newest-first.
     """
-    closed = _ts(trade["closed_at"])
-    qty = float(trade["qty"] or 0)
-    if not closed or qty <= 0:
-        return None
     groups = {}
-    for f in fills:
-        ft = _ts(f.get("time"))
-        if not ft or abs(ft - closed) > MATCH_WINDOW:
+    for f in client.get_user_fills():
+        pid = f.get("pid")
+        if not pid:
             continue
         try:
-            sz, px = abs(float(f.get("sz") or 0)), float(f.get("px") or 0)
+            px, sz = float(f.get("px") or 0), abs(float(f.get("sz") or 0))
         except (TypeError, ValueError):
             continue
         if px <= 0 or sz <= 0:
             continue
-        g = groups.setdefault(f.get("oid") or f"_{ft.isoformat()}",
-                              {"sz": 0.0, "notional": 0.0, "fee": 0.0,
-                               "pnl": 0.0, "n": 0, "dt": abs(ft - closed)})
-        g["sz"] += sz
-        g["notional"] += px * sz
+        g = groups.setdefault(pid, {"coin": str(f.get("coin", "")).upper(),
+                                    "opens": [], "closes": [], "fee": 0.0,
+                                    "pnl": 0.0, "times": []})
         g["fee"] += float(f.get("fee") or 0)
         g["pnl"] += float(f.get("closedPnl") or 0)
-        g["n"] += 1
-        g["dt"] = min(g["dt"], abs(ft - closed))
-    # Prefer the size-consistent group closest in time to the booked close.
-    cands = [g for g in groups.values() if abs(g["sz"] - qty) / qty <= SIZE_TOL]
-    if not cands:
-        return None
-    g = min(cands, key=lambda x: x["dt"])
-    return g["notional"] / g["sz"], g["fee"], g["pnl"], g["n"]
+        ts = _ts(f.get("time"))
+        if ts:
+            g["times"].append(ts)
+        (g["closes"] if str(f.get("dir", "")).startswith("Close")
+         else g["opens"]).append((px, sz))
 
-
-def reconcile(db, client):
-    """Compare every local trade against the venue. Returns (fixes, orphans)."""
-    by_coin = _venue_closes(client)
-    rows = db._conn.execute(
-        "SELECT id, coin, side, entry, exit, qty, fee, net_pct, exit_reason, "
-        "opened_at, closed_at FROM trades ORDER BY id ASC").fetchall()
-    fixes, orphans = [], []
-    for t in rows:
-        t = dict(t)
-        m = _match(t, by_coin.get(t["coin"].upper(), []))
-        if m is None:
-            orphans.append(t)
+    closed, open_ = [], []
+    tot_pnl = tot_fee = 0.0
+    for pid, g in groups.items():
+        tot_pnl += g["pnl"]
+        tot_fee += g["fee"]
+        if not g["opens"] or not g["times"]:
             continue
-        avg_px, fee, pnl, n = m
-        if (abs(avg_px - float(t["exit"])) / float(t["exit"]) > 1e-6
-                or abs(fee - float(t["fee"] or 0)) > 1e-6):
-            fixes.append((t, avg_px, fee, n))
-    return fixes, orphans
+        oq = sum(q for _, q in g["opens"])
+        entry = sum(p * q for p, q in g["opens"]) / oq
+        rec = {"pid": pid, "coin": g["coin"], "qty": round(oq, 10),
+               "entry": entry, "fee": g["fee"], "pnl": g["pnl"],
+               "opened_at": min(g["times"]), "closed_at": max(g["times"])}
+        if not g["closes"]:
+            open_.append(rec)
+            continue
+        cq = sum(q for _, q in g["closes"])
+        rec["exit"] = sum(p * q for p, q in g["closes"]) / cq
+        moved_up = rec["exit"] > rec["entry"]
+        rec["side"] = "long" if (g["pnl"] > 0) == moved_up else "short"
+        closed.append(rec)
+    closed.sort(key=lambda r: r["closed_at"], reverse=True)
+    return closed, open_, {"pnl": tot_pnl, "fee": tot_fee, "net": tot_pnl - tot_fee}
 
 
-def _pnl(side, entry, exit_, qty, fee):
-    sign = 1.0 if side == "long" else -1.0
-    return (float(exit_) - float(entry)) * sign * float(qty) - float(fee or 0.0)
+def _old_reasons(db):
+    """(coin, closed_at) -> exit_reason from the existing ledger, so rebuilt
+    trades keep their TRAIL / HARD_STOP labels where they were trustworthy."""
+    out = []
+    for r in db._conn.execute(
+            "SELECT coin, closed_at, exit_reason, net_pct FROM trades").fetchall():
+        t = _ts(r["closed_at"])
+        if t:
+            out.append((r["coin"].upper(), t, r["exit_reason"], r["net_pct"] or 0.0))
+    return out
 
 
+def _reason_for(rec, olds):
+    """Best-effort label. A fabricated -10% HARD_STOP is never carried over —
+    that label was the symptom, not a fact about the trade."""
+    best, best_dt = None, None
+    for coin, t, reason, net in olds:
+        if coin != rec["coin"]:
+            continue
+        dt = abs(t - rec["closed_at"])
+        if dt > REASON_WINDOW:
+            continue
+        if reason == "HARD_STOP" and net <= -9.0:
+            continue
+        if best_dt is None or dt < best_dt:
+            best, best_dt = reason, dt
+    return best or "RECONCILED"
+
+
+# ── report / apply ──────────────────────────────────────────────
 def report(db, client, apply=False):
-    fixes, orphans = reconcile(db, client)
-    acct = db.account()
+    closed, open_, tot = venue_positions(client)
     before = db.realized_pnl()
+    n_before = db.trade_count()
+    rebuilt_net = sum(r["pnl"] - r["fee"] for r in closed)
 
-    print(f"\n{'═' * 72}")
-    print(f"  LEDGER RECONCILIATION — {config.EXCHANGE.upper()}")
-    print(f"{'═' * 72}")
-    print(f"  local trades          {db.trade_count()}")
-    print(f"  matched to venue      {len(fixes)} need correction")
-    print(f"  NO venue fill found   {len(orphans)}")
+    print(f"\n{'=' * 72}")
+    print(f"  LEDGER REBUILD FROM VENUE FILLS — {config.EXCHANGE.upper()}")
+    print(f"{'=' * 72}")
+    print(f"  local trades now          {n_before}")
+    print(f"  venue round trips (closed) {len(closed)}")
+    print(f"  venue positions still open {len(open_)}"
+          + (f"  [{', '.join(r['coin'] for r in open_)}]" if open_ else ""))
 
-    if fixes:
-        print(f"\n  ── corrections (exit / fee from the real fill) ──")
-        for t, px, fee, n in fixes:
-            old = _pnl(t["side"], t["entry"], t["exit"], t["qty"], t["fee"])
-            new = _pnl(t["side"], t["entry"], px, t["qty"], fee)
-            print(f"   {t['closed_at'][:19]} {t['coin']:9} {t['side']:5} "
-                  f"exit {float(t['exit']):>11.6f} -> {px:>11.6f}  "
-                  f"fee {float(t['fee'] or 0):>6.2f} -> {fee:>6.2f}  "
-                  f"pnl {old:>+9.2f} -> {new:>+9.2f}  ({n} fill{'s' if n > 1 else ''})")
+    print(f"\n  -- rebuilt ledger, newest 15 --")
+    for r in closed[:15]:
+        print(f"   {r['closed_at'].isoformat()[:19]} {r['coin']:9} {r['side']:5} "
+              f"entry {r['entry']:>11.5f} exit {r['exit']:>11.5f} "
+              f"fee {r['fee']:>5.2f} net {r['pnl'] - r['fee']:>+8.2f}")
+    if len(closed) > 15:
+        print(f"   ... and {len(closed) - 15} more")
 
-    if orphans:
-        print(f"\n  ── no matching venue fill — candidates to VOID ──")
-        print(f"     (a local 'close' the venue has no record of: the position")
-        print(f"      never existed, so its PnL was invented)")
-        for t in orphans:
-            p = _pnl(t["side"], t["entry"], t["exit"], t["qty"], t["fee"])
-            flag = "  ← fabricated -10% signature" if (t["exit_reason"] == "HARD_STOP"
-                                                       and (t["net_pct"] or 0) <= -9.0) else ""
-            print(f"   {(t['closed_at'] or '')[:19]} {t['coin']:9} {t['side']:5} "
-                  f"{t['exit_reason'] or '':12} net {float(t['net_pct'] or 0):>7.2f}% "
-                  f"pnl {p:>+9.2f}{flag}")
-
-    # What the ledger becomes.
-    after = before
-    for t, px, fee, _ in fixes:
-        after += _pnl(t["side"], t["entry"], px, t["qty"], fee) - \
-                 _pnl(t["side"], t["entry"], t["exit"], t["qty"], t["fee"])
-    for t in orphans:
-        after -= _pnl(t["side"], t["entry"], t["exit"], t["qty"], t["fee"])
-
-    venue_eq = client.get_equity() or 0.0
-    initial = getattr(client, "_initial_balance", None) or acct.get("inception") or 0.0
-    venue_realized = venue_eq - initial if initial else None
-
-    print(f"\n  ── realized PnL ──")
-    print(f"   ledger now            ${before:>+10.2f}")
-    print(f"   ledger after repair   ${after:>+10.2f}")
-    if venue_realized is not None:
-        print(f"   venue truth           ${venue_realized:>+10.2f}   "
-              f"(equity ${venue_eq:,.2f} − initial ${initial:,.2f})")
-        print(f"   residual gap          ${after - venue_realized:>+10.2f}")
-    print(f"{'═' * 72}\n")
+    print(f"\n  -- realized PnL --")
+    print(f"   ledger now                ${before:>+10.2f}")
+    print(f"   rebuilt from venue fills  ${rebuilt_net:>+10.2f}")
+    print(f"   venue total incl. open    ${tot['net']:>+10.2f}   "
+          f"(gross ${tot['pnl']:+.2f} - fees ${tot['fee']:.2f})")
+    print(f"   correction                ${rebuilt_net - before:>+10.2f}")
+    print(f"{'=' * 72}\n")
 
     if not apply:
-        print("Dry run — nothing written. Re-run with --apply to commit.\n")
+        print("Dry run - nothing written. Set RECONCILE_LEDGER=apply to commit.\n")
+        return
+    if not closed:
+        print("No venue round trips resolved - refusing to wipe the ledger.\n")
         return
 
-    if not (fixes or orphans):
-        print("Nothing to change.\n")
-        return
-
-    # HARD GUARD. The equity re-anchor below computes inception from
+    # HARD GUARD. The equity re-anchor below derives inception from
     # get_equity(), which on Propr is marginBalance = wallet + UNREALISED.
-    # Applying with positions open would fold their floating PnL permanently
-    # into the baseline and silently corrupt every future return figure.
-    # Reporting is always safe; only the write needs a flat book.
+    # Applying with positions open folds their floating PnL permanently into
+    # the baseline and skews every return figure afterwards.
     open_now = db.open_positions()
     if open_now:
-        print(f"✗ REFUSING TO APPLY — {len(open_now)} position(s) still open: "
+        print(f"x REFUSING TO APPLY - {len(open_now)} position(s) still open: "
               f"{', '.join(p['coin'] for p in open_now)}.")
         print("  Venue equity includes their unrealised PnL, which would be baked")
         print("  into inception and skew every return from here on.")
@@ -338,47 +295,46 @@ def report(db, client, apply=False):
 
     bak = f"{db.path}.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.bak"
     shutil.copy2(db.path, bak)
-    print(f"→ backup written: {bak}")
+    print(f"-> backup written: {bak}")
 
-    for t, px, fee, _ in fixes:
-        sign = 1.0 if t["side"] == "long" else -1.0
-        move = (px - float(t["entry"])) * sign
-        ret = move / float(t["entry"]) * 100
-        fee_pct = fee / (float(t["entry"]) * float(t["qty"])) * 100
+    olds = _old_reasons(db)
+    db._conn.execute("DELETE FROM trades")
+    for r in sorted(closed, key=lambda x: x["closed_at"]):
+        sign = 1.0 if r["side"] == "long" else -1.0
+        move = (r["exit"] - r["entry"]) * sign
+        ret = move / r["entry"] * 100 if r["entry"] else 0.0
+        fee_pct = (r["fee"] / (r["entry"] * r["qty"]) * 100) if r["qty"] else 0.0
         db._conn.execute(
-            "UPDATE trades SET exit=?, fee=?, ret_pct=?, net_pct=? WHERE id=?",
-            (px, fee, round(ret, 4), round(ret - fee_pct, 4), t["id"]))
-    for t in orphans:
-        db._conn.execute("DELETE FROM trades WHERE id=?", (t["id"],))
+            "INSERT INTO trades (coin, side, entry, exit, qty, ret_pct, net_pct, "
+            "friction_pct, fee, exit_reason, opened_at, closed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r["coin"], r["side"], r["entry"], r["exit"], r["qty"],
+             round(ret, 4), round(ret - fee_pct, 4), None, round(r["fee"], 6),
+             _reason_for(r, olds), r["opened_at"].isoformat(),
+             r["closed_at"].isoformat()))
     db._conn.commit()
-    print(f"→ {len(fixes)} corrected, {len(orphans)} voided")
+    print(f"-> ledger rebuilt: {n_before} rows -> {db.trade_count()} rows")
 
-    # Re-pin the equity accumulator to the repaired ledger, then anchor the
-    # inception so the curve tip lands on the venue's number. On a challenge
-    # account there are no deposits/withdrawals, so the venue ledger IS the
-    # flow-neutral truth and the two must agree.
     realized = db.realized_pnl()
-    if venue_realized is not None and abs(realized - venue_realized) > 0.01:
-        drift = venue_realized - realized
-        print(f"→ residual ${drift:+.2f} unexplained by trade records "
-              f"(un-booked fees, partial fills, or closes outside the match window)")
-    inception = venue_eq - realized if venue_realized is not None else (acct.get("inception") or 0.0)
-    db.set_account(equity=round(inception + realized, 4), inception=round(inception, 4),
+    venue_eq = client.get_equity() or 0.0
+    inception = venue_eq - realized
+    acct = db.account()
+    db.set_account(equity=round(venue_eq, 4), inception=round(inception, 4),
                    inception_ts=acct.get("inception_ts") or iso())
-    print(f"→ account resynced: inception ${inception:,.2f}, "
-          f"realized ${realized:+,.2f}, equity ${inception + realized:,.2f}")
+    print(f"-> account resynced: inception ${inception:,.2f}, "
+          f"realized ${realized:+,.2f}, equity ${venue_eq:,.2f}")
 
     from app import _rebuild_logs_from_ledger
     _rebuild_logs_from_ledger(db)
-    print("→ equity curve + trade log rebuilt from the repaired ledger\n")
+    print("-> equity curve + trade log rebuilt from the repaired ledger\n")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Reconcile the local ledger against the venue.")
+    ap = argparse.ArgumentParser(description="Rebuild the local ledger from the venue.")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--inspect", action="store_true", help="dump the raw /trades payload")
     g.add_argument("--report", action="store_true", help="show what would change")
-    g.add_argument("--apply", action="store_true", help="commit the corrections")
+    g.add_argument("--apply", action="store_true", help="commit the rebuild")
     a = ap.parse_args()
 
     client = _client()
@@ -386,16 +342,10 @@ def main():
         inspect(client)
         return
     db = DB()
-    # Guard against the obvious footgun: running --report/--apply from a laptop.
-    # The real ledger lives on the service's mounted volume, so DB() here opens a
-    # brand-new empty file and the run would silently "reconcile" nothing.
-    # `railway run` does not help — it injects env vars but still runs locally,
-    # with no volume. Use RECONCILE_LEDGER=report|apply on the service instead.
     if db.trade_count() == 0:
-        sys.exit(f"{db.path} has no trades — this is not the live ledger.\n"
-                 f"The real DB is on the service's volume. Set the env var "
-                 f"RECONCILE_LEDGER=report (then =apply) on Railway and redeploy;\n"
-                 f"the repair runs at boot and prints to the deploy logs.")
+        sys.exit(f"{db.path} has no trades - this is not the live ledger.\n"
+                 f"The real DB is on the service's volume. Set RECONCILE_LEDGER "
+                 f"on Railway and redeploy; the repair runs at boot.")
     report(db, client, apply=a.apply)
 
 

@@ -60,6 +60,7 @@ _CLOSING_TYPES = ("close", "flip", "reduce", "decrease", "partial_close", "liqui
 # /trades paging. 100 is the accepted cap — 200 is a bare 400. See get_user_fills().
 _FILLS_PAGE = 100
 _FILLS_MAX_ROWS = 2000     # backstop so a paging bug can never loop forever
+_POSITIONS_MAX_ROWS = 1000 # same backstop for the positions pager
 
 
 def _ulid() -> str:
@@ -310,15 +311,45 @@ class ProprClient:
 
     # ── positions ───────────────────────────────────────────────
     def _raw_positions(self) -> Optional[list]:
-        # No query params: the server rejects status/limit with a bare 400.
-        # Filter client-side, which the docs recommend anyway for zero-qty rows.
-        d = self._req("GET", f"/accounts/{self.account_id}/positions")
-        if d is None:
-            return None                      # failed read != flat (Farms lesson)
-        rows = d.get("data", [])
-        return [p for p in rows
+        """Open positions, PAGED.
+
+        This used to send no params at all and read a single default page. That
+        page is small and newest-first, so any position older than it was
+        INVISIBLE to the bot — and invisible is indistinguishable from closed
+        everywhere downstream. It is the reason DOT (opened 27 Jul) and PENGU
+        sat live and unmanaged for days while the ledger showed them stopped
+        out: reconcile() saw them absent and booked a close, _check_orphans()
+        iterates this same list so it could never flag them, and nothing was
+        left watching their risk.
+
+        Paged exactly like /trades: limit=100 (the accepted cap; 200 is a bare
+        400) plus offset. status/zero-qty filtering stays client-side.
+        """
+        rows, offset = [], 0
+        while offset < _POSITIONS_MAX_ROWS:
+            d = self._req("GET", f"/accounts/{self.account_id}/positions",
+                          params={"limit": _FILLS_PAGE, "offset": offset})
+            if d is None:
+                # A failed read must never look flat (the Farms lesson). If we
+                # already have pages, return them; otherwise signal failure.
+                return rows or None
+            page = d.get("data", [])
+            rows.extend(page)
+            if len(page) < _FILLS_PAGE:
+                break
+            offset += _FILLS_PAGE
+        keep = [p for p in rows
                 if _f(p.get("quantity")) != 0
                 and str(p.get("status", "open")).lower() == "open"]
+        # Surface a status vocabulary we don't recognise rather than silently
+        # filtering live positions out of existence.
+        seen = {str(p.get("status", "")).lower() for p in rows if p.get("status")}
+        unknown = seen - {"open", "closed", "liquidated", ""}
+        if unknown and "pos_status" not in self._logged_shapes:
+            self._logged_shapes.add("pos_status")
+            logger.warning(f"positions: unrecognised status values {sorted(unknown)} "
+                           f"— verify none of these mean OPEN")
+        return keep
 
     def get_positions(self):
         """HL-shaped dicts so position_manager needs no changes.
@@ -656,5 +687,12 @@ class ProprClient:
                 # 0.493 + 1.196 + 1.779). Anything matching fills to a booked
                 # trade must aggregate by this, or it sees only fragments.
                 "oid": t.get("orderId"),
+                # The venue's own position lifecycle id. Grouping fills by this
+                # reconstructs true round trips exactly — far more reliable than
+                # matching booked trades to fills by time and size, which cannot
+                # tell a long's close from the close of a short that preceded it
+                # on the same coin.
+                "pid": t.get("positionId"),
+                "type": ttype,
             })
         return out
