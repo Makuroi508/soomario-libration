@@ -189,7 +189,19 @@ class PositionManager:
             stop_id = "paper"
         else:
             self.client.set_leverage(coin, int(config.LEVERAGE))  # isolated (is_cross_for=False)
-            order = self.client.market_open(coin, is_long, notional, current_price=price)
+            # Preferred path: submit the entry and its stop as ONE order group,
+            # so there is no window in which a filled position has no stop. The
+            # trigger is computed from the pre-trade price rather than the fill
+            # — observed slippage is under 0.06%, far inside the 10% stop, and
+            # a stop that exists is worth more than one that is exact.
+            order = None
+            if hasattr(self.client, "market_open_with_stop"):
+                pre_stop = price * (1 - config.HARD_STOP_PCT / 100) if is_long \
+                    else price * (1 + config.HARD_STOP_PCT / 100)
+                order = self.client.market_open_with_stop(
+                    coin, is_long, notional, pre_stop, current_price=price)
+            if order is None:
+                order = self.client.market_open(coin, is_long, notional, current_price=price)
             if not order or not order.get("filled"):
                 reason = getattr(self.client, "last_open_error", None) or "not_filled"
                 self.db.log_miss(coin, signal, f"entry_failed:{reason}"); return None
@@ -199,7 +211,11 @@ class PositionManager:
         # ── hard stop, placed immediately (10%) ──
         stop_px = avg * (1 - config.HARD_STOP_PCT / 100) if is_long \
             else avg * (1 + config.HARD_STOP_PCT / 100)
-        if not config.PAPER:
+        if not config.PAPER and (order or {}).get("stop_oid"):
+            # The group already attached it — no second call, no race.
+            stop_id = order["stop_oid"]
+            stop_px = float(order.get("stop_px") or stop_px)
+        elif not config.PAPER:
             stop_id = self.client.place_stop_market(coin, is_long, qty, stop_px)
             if stop_id is None:
                 # Filled but unprotected — flatten immediately rather than ride naked.

@@ -53,10 +53,10 @@ _TIMEOUT = 20
 # How long to wait for a filled entry to surface as a queryable position before
 # giving up on attaching its stop. See _position_id().
 POSITION_ID_WAIT = float(os.getenv("POSITION_ID_WAIT", "20"))
-# /trades `type` values that realise PnL. Confirmed from live payloads: open,
-# close, flip. The rest are defensive — an unknown closing type that slips
-# through is caught by the isLiquidation / realizedPnl backstops.
-_CLOSING_TYPES = ("close", "flip", "reduce", "decrease", "partial_close", "liquidation")
+# /trades `type` values, per the docs: open | increase | reduce | close | flip
+# | liquidation. Only these four realise PnL. `increase` adds to a position and
+# must NOT count as closing, or an average-up would book a phantom exit.
+_CLOSING_TYPES = ("reduce", "close", "flip", "liquidation")
 # /trades paging. 100 is the accepted cap — 200 is a bare 400. See get_user_fills().
 _FILLS_PAGE = 100
 _FILLS_MAX_ROWS = 2000     # backstop so a paging bug can never loop forever
@@ -322,13 +322,18 @@ class ProprClient:
         iterates this same list so it could never flag them, and nothing was
         left watching their risk.
 
-        Paged exactly like /trades: limit=100 (the accepted cap; 200 is a bare
-        400) plus offset. status/zero-qty filtering stays client-side.
+        The old comment here claimed "the server rejects status/limit with a
+        bare 400". That was the original misdiagnosis and it is wrong: the docs
+        list `status` (open/closed/liquidated), `limit` and `offset` as
+        supported on this endpoint. What actually 400s is limit ABOVE the cap —
+        the same mistake as `?limit=200` on /trades. Ask for status=open and
+        page properly.
         """
         rows, offset = [], 0
         while offset < _POSITIONS_MAX_ROWS:
             d = self._req("GET", f"/accounts/{self.account_id}/positions",
-                          params={"limit": _FILLS_PAGE, "offset": offset})
+                          params={"status": "open", "limit": _FILLS_PAGE,
+                                  "offset": offset})
             if d is None:
                 # A failed read must never look flat (the Farms lesson). If we
                 # already have pages, return them; otherwise signal failure.
@@ -519,6 +524,80 @@ class ProprClient:
         # key MUST be total_size — position_manager reads order["total_size"]
         return {"filled": True, "avg_price": fill, "total_size": size,
                 "size": size, "oid": res.get("orderId"), "raw": res}
+
+    def market_open_with_stop(self, symbol: str, is_buy: bool, notional_usd: float,
+                              stop_px: float, current_price: Optional[float] = None
+                              ) -> Optional[dict]:
+        """Entry AND its hard stop, submitted as ONE order group.
+
+        This is the documented second half of
+        13056 CONDITIONAL_ORDER_REQUIRES_POSITION_OR_GROUP: a conditional order
+        needs a positionId *or* to sit in the same group as an entry order.
+        Only the positionId branch was ever used, which is inherently racy —
+        the position has to exist and be queryable before the stop can be
+        attached, and every failure left a filled position riding naked.
+
+        With a group there is no window at all: the stop is accepted with the
+        entry or the whole batch is rejected. Per the docs, a top-level
+        `orderGroupId` (a ULID we generate) is required whenever orders.length
+        > 1, and only one entry order is allowed per request.
+
+        Returns None if the group is rejected, so the caller can fall back to
+        the old two-step flow.
+        """
+        asset = hl_symbol(short_name(symbol))
+        px = current_price if (current_price or 0) > 0 else (self.get_price(short_name(symbol)) or 0)
+        if px <= 0:
+            self.last_open_error = "no price"
+            return None
+        size = self._round(symbol, notional_usd / px)
+        if size <= 0 or size * px < 10:
+            self.last_open_error = (f"size {size} rounds below the $10 minimum "
+                                    f"(notional ${notional_usd:.2f})")
+            logger.warning(f"⚠️  {asset}: {self.last_open_error}")
+            return None
+        trigger = self._round_px(symbol, stop_px)
+        common = {"asset": asset, "base": asset, "quote": "USDC",
+                  "exchange": "hyperliquid", "productType": "perp",
+                  "quantity": str(size)}
+        entry = dict(common, intentId=_ulid(), type="market",
+                     side="buy" if is_buy else "sell",
+                     positionSide="long" if is_buy else "short",
+                     reduceOnly=False, closePosition=False, timeInForce="IOC")
+        # The stop leg uses the ALIGNED shape (buy<->long, sell<->short), which
+        # is what the live API accepts — verified from cached shape discovery
+        # ("stop kPEPE: shape 'aligned' (side=sell positionSide=short)" closing
+        # a long). The docs' example uses side=sell/positionSide=long and the
+        # live API rejects exactly that with 13096.
+        stop = dict(common, intentId=_ulid(), type="stop_market",
+                    side="sell" if is_buy else "buy",
+                    positionSide="short" if is_buy else "long",
+                    triggerPrice=str(trigger), reduceOnly=True,
+                    closePosition=False, timeInForce="GTC")
+        d = self._req("POST", f"/accounts/{self.account_id}/orders",
+                      json={"orderGroupId": _ulid(), "accountId": self.account_id,
+                            "orders": [entry, stop]})
+        if not d:
+            err = (self.last_error or {})
+            self.last_open_error = (f"group rejected: {err.get('code', '?')} "
+                                    f"{str(err.get('message', ''))[:80]}")
+            logger.warning(f"⚠️  {asset}: entry+stop group rejected "
+                           f"({self.last_open_error}) — falling back to two-step")
+            return None
+        rows = d.get("data", [])
+        if not rows:
+            self.last_open_error = "group returned no orders"
+            return None
+        # Match the legs back by type; order in the response is not guaranteed.
+        e_row = next((r for r in rows if str(r.get("type", "")).lower() == "market"), rows[0])
+        s_row = next((r for r in rows if str(r.get("type", "")).lower() == "stop_market"), None)
+        fill = _f(e_row.get("averageFillPrice")) or px
+        stop_oid = s_row.get("orderId") if s_row else None
+        logger.info(f"✅ {asset} open {'long' if is_buy else 'short'} {size} @ ${fill:.6f} "
+                    f"({e_row.get('orderId')})  🛡 stop @ ${trigger:.6f} ({stop_oid})")
+        return {"filled": True, "avg_price": fill, "total_size": size, "size": size,
+                "oid": e_row.get("orderId"), "stop_oid": str(stop_oid) if stop_oid else None,
+                "stop_px": trigger, "raw": d}
 
     def market_close(self, symbol: str, size: float, is_long: bool,
                      current_price: Optional[float] = None) -> Optional[dict]:
