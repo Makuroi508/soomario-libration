@@ -293,22 +293,34 @@ class PositionManager:
         typ = (r.get("dd_type") or config.DD_TYPE or "static").lower()
         return pct, typ
 
-    def _risk_equity(self) -> float:
+    def _risk_equity(self, strict: bool = False):
         """The equity the daily guard measures against.
 
         On a prop venue this MUST be the venue's own ledger. If our flow-neutral
         number says we're down 1.4% while Propr's accounting says 3.1%, Propr's
         is the one that ends the challenge — so the guard and the breach engine
-        have to read from the same source. Falls back to performance equity on
-        Hyperliquid, in PAPER, or if the venue read fails."""
+        have to read from the same source.
+
+        `strict=True` returns None instead of falling back when the venue read
+        fails. Risk decisions MUST use strict: daily_baseline is recorded from
+        the VENUE, so substituting local performance equity compares two
+        different measurement bases and manufactures a drawdown equal to
+        whatever the local ledger is off by. On 31 Jul a Propr outage (500s on
+        /challenge-attempts, 403s on /positions) did exactly that: the fallback
+        read -4.35% against a 3.00% limit and liquidated six positions that
+        were really about -1.2% down on the day. Non-strict callers (status
+        display, logging) can still take the approximation.
+        """
         if config.EXCHANGE in ("propr", "foxify") and not config.PAPER:
             try:
                 eq = self.client.get_equity() or 0.0
             except Exception as e:
-                logger.warning(f"guard: venue equity read failed ({e}) — using perf equity")
+                logger.warning(f"guard: venue equity read failed ({e})")
                 eq = 0.0
             if eq > 0:
                 return eq
+            if strict:
+                return None
             logger.warning("guard: venue equity unavailable — falling back to perf equity")
         return self.equity()
 
@@ -412,8 +424,22 @@ class PositionManager:
             return
         halted = bool(acct["daily_halt"])
         limit = self.daily_limit_pct()
-        dd = (base - self._risk_equity()) / base * 100
-        if not halted and dd >= limit:
+        eq = self._risk_equity(strict=True)
+        if eq is None:
+            # Cannot measure risk against the same basis as the baseline.
+            # Halting here is irreversible — it liquidates the book — while
+            # waiting one tick is not. Never flatten on data we do not have.
+            # Positions keep their resting stops meanwhile.
+            if not halted:
+                logger.error("guard: venue equity unavailable — SKIPPING the daily-DD "
+                             "evaluation this tick rather than measuring against a "
+                             "different basis. No halt, no flatten. Stops still apply.")
+                return
+            # Already halted on good data: fall through so a failed flatten
+            # still gets retried below.
+        else:
+            dd = (base - eq) / base * 100
+        if eq is not None and not halted and dd >= limit:
             self.db.set_account(daily_halt=1)
             halted = True
             n = len(self.db.open_positions())
