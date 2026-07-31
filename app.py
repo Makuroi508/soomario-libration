@@ -317,6 +317,27 @@ def run_worker():
         _repair_phantom_closes(hl, db)
     if os.getenv("REBUILD_CURVE") == "1":
         _rebuild_logs_from_ledger(db)
+    # Ledger reconciliation against the VENUE's own trade history — the repair
+    # for the `?limit=200` incident, where every close booked at an estimate and
+    # eight positions that never opened were booked at exactly -10%. Runs here
+    # rather than as a CLI because the SQLite file lives on the Railway volume,
+    # which only the service can reach.
+    #   RECONCILE_LEDGER=inspect  dump the raw /trades payload (verify the mapping)
+    #   RECONCILE_LEDGER=report   print what would change, write nothing
+    #   RECONCILE_LEDGER=apply    commit it (backs the DB up first)
+    # Remove the env var after one run, or it repeats on every boot.
+    _rl = (os.getenv("RECONCILE_LEDGER") or "").strip().lower()
+    if _rl in ("inspect", "report", "apply"):
+        import repair
+        logger.info(f"🔧 RECONCILE_LEDGER={_rl} — running one-shot ledger repair")
+        try:
+            if _rl == "inspect":
+                repair.inspect(hl)
+            else:
+                repair.report(db, hl, apply=(_rl == "apply"))
+            logger.info("🔧 ledger repair finished — REMOVE the RECONCILE_LEDGER env var now")
+        except Exception as e:
+            logger.exception(f"🔧 ledger repair FAILED ({e}) — ledger left untouched")
     # Self-heal: re-adopt any open exchange position the DB has lost, so the bot
     # manages it instead of abandoning it (or doubling it). Runs every boot.
     pm.adopt_unmanaged()

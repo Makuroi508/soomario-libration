@@ -25,7 +25,8 @@ WHAT PROPR DOES DIFFERENTLY FROM HL (and the code that handles it)
   7. There is no balance endpoint. Equity comes from the challenge attempt,
      which is also the ledger Propr uses to judge a breach — so the guard and
      the breach engine read the same number.
-  8. Fees are 0.075% both sides, vs 0.045% taker on HL.
+  8. Fees: the docs say 0.075%, but live /trades rows report feeRate 0.00045 —
+     0.045% taker, the same as HL. Observed, not assumed.
 
 FIELD NAMES MARKED `# VERIFY` are inferred from the docs' prose rather than a
 sample payload. _log_unmapped() prints the raw keys on first call so the first
@@ -49,6 +50,16 @@ logger = logging.getLogger("propr_client")
 BASE = os.getenv("PROPR_API_BASE", "https://api.propr.xyz/v1").rstrip("/")
 CLOSE_SLIPPAGE = float(os.getenv("CLOSE_SLIPPAGE", "0.02"))
 _TIMEOUT = 20
+# How long to wait for a filled entry to surface as a queryable position before
+# giving up on attaching its stop. See _position_id().
+POSITION_ID_WAIT = float(os.getenv("POSITION_ID_WAIT", "20"))
+# /trades `type` values that realise PnL. Confirmed from live payloads: open,
+# close, flip. The rest are defensive — an unknown closing type that slips
+# through is caught by the isLiquidation / realizedPnl backstops.
+_CLOSING_TYPES = ("close", "flip", "reduce", "decrease", "partial_close", "liquidation")
+# /trades paging. 100 is the accepted cap — 200 is a bare 400. See get_user_fills().
+_FILLS_PAGE = 100
+_FILLS_MAX_ROWS = 2000     # backstop so a paging bug can never loop forever
 
 
 def _ulid() -> str:
@@ -339,20 +350,35 @@ class ProprClient:
         return None
 
     def _position_id(self, symbol: str, is_long: bool) -> Optional[str]:
-        """Conditional orders need this. Only exists once the entry has filled."""
+        """Conditional orders need this. Only exists once the entry has filled.
+
+        The fill and the position record are not atomic, and the observed lag on
+        Propr is routinely longer than the ~3s this used to wait. Losing the race
+        is expensive: place_stop_market() returns None, maybe_enter() tries to
+        flatten (often also rejected, because the position isn't queryable yet
+        either), and the entry ends up recorded with hard_stop_id=None. Wait
+        with backoff up to POSITION_ID_WAIT seconds instead — a slow entry costs
+        seconds, a missed stop costs the position.
+        """
         target, want = short_name(symbol), "long" if is_long else "short"
-        # The fill and the position record are not atomic. Retry briefly rather
-        # than fail the stop — maybe_enter() flattens on a missing stop, so a
-        # spurious miss costs a full round trip in fees.
-        for attempt in range(5):
+        deadline = time.time() + POSITION_ID_WAIT
+        attempt, delay = 0, 0.4
+        while True:
             for p in (self._raw_positions() or []):
                 if (short_name(str(p.get("asset", ""))) == target
                         and str(p.get("positionSide", "")).lower() == want
                         and _f(p.get("quantity")) != 0):
+                    if attempt:
+                        logger.info(f"    ↳ {target}: positionId resolved after "
+                                    f"{attempt + 1} tries")
                     return p.get("positionId")
-            if attempt < 4:
-                time.sleep(0.6)
-        logger.error(f"{target}: positionId never appeared after 5 tries (~3s)")
+            attempt += 1
+            if time.time() + delay >= deadline:
+                break
+            time.sleep(delay)
+            delay = min(delay * 1.6, 3.0)
+        logger.error(f"{target}: positionId never appeared after {attempt} tries "
+                     f"(~{POSITION_ID_WAIT:.0f}s)")
         return None
 
     # ── orders ──────────────────────────────────────────────────
@@ -551,12 +577,47 @@ class ProprClient:
 
     # ── fills (feeds friction_pct — the point of this experiment) ─
     def get_user_fills(self, start_ms: Optional[int] = None) -> list[dict]:
-        """Propr /trades mapped to HL userFills shape: coin, dir, px, sz, fee."""
-        d = self._req("GET", f"/accounts/{self.account_id}/trades", params={"limit": 200})
-        if not d:
-            return []
-        out = []
-        for t in d.get("data", []):
+        """Propr /trades mapped to HL userFills shape: coin, dir, px, sz, fee.
+
+        PAGING, THE HARD-WON VERSION. `limit=200` returns a bare 400 ("Bad
+        Request Exception") and that is the whole origin of the phantom-close
+        incident: every call failed, silently. _req() logged the 400 and
+        returned None, we returned [], and reconcile() read "the fill never
+        indexed" instead of "the fills endpoint is broken" — so every close
+        fell through to the stop-estimate path, booking positions that never
+        armed a trail at exactly the hard stop, a fabricated -10%.
+
+        Probed empirically (repair.py --inspect): the cap is 100, not 200.
+        `limit=100` is accepted and `offset` walks backwards through history;
+        pageSize/perPage/page/startTime/from are all silently IGNORED (200 OK
+        with the default 10 rows), which is worse than a 400 — they look like
+        they work. Default page is only 10 rows / a few hours, so anything
+        historical MUST page or it silently sees a sliver of the account.
+        """
+        out, offset = [], 0
+        rows = []
+        while offset < _FILLS_MAX_ROWS:
+            d = self._req("GET", f"/accounts/{self.account_id}/trades",
+                          params={"limit": _FILLS_PAGE, "offset": offset})
+            if not d:
+                break
+            page = d.get("data", [])
+            rows.extend(page)
+            if len(page) < _FILLS_PAGE:
+                break
+            offset += _FILLS_PAGE
+            # Stop early once the page is entirely older than the caller's
+            # window — history is returned newest-first.
+            if start_ms and page:
+                oldest = str(page[-1].get("executedAt") or "")
+                try:
+                    from datetime import datetime
+                    if int(datetime.fromisoformat(
+                            oldest.replace("Z", "+00:00")).timestamp() * 1000) < start_ms:
+                        break
+                except (ValueError, TypeError):
+                    pass
+        for t in rows:
             self._log_unmapped("trade", t)
             ts = t.get("executedAt") or ""
             if start_ms:
@@ -567,13 +628,33 @@ class ProprClient:
                         continue
                 except (ValueError, TypeError):
                     pass
-            closing = str(t.get("type", "")).lower() in ("reduce", "close", "liquidation")
-            side = "Long" if str(t.get("positionSide", "")).lower() == "long" else "Short"
+            # Observed `type` values: open | close | flip. `flip` reverses a
+            # position, so it BOTH closes and opens — it must count as closing
+            # or its realized PnL is lost. isLiquidation / a non-zero
+            # realizedPnl are backstops for any type string not seen yet.
+            ttype = str(t.get("type", "")).lower()
+            closing = (ttype in _CLOSING_TYPES
+                       or bool(t.get("isLiquidation"))
+                       or _f(t.get("realizedPnl")) != 0.0)
+            # positionSide on a trade row mirrors the ORDER side (buy<->long,
+            # sell<->short), NOT the direction of the position being closed:
+            # the ZEC close of a SHORT reports side=buy, positionSide=long. HL's
+            # `dir` names the POSITION, so a close inverts it.
+            order_is_buy = str(t.get("side", "")).lower() == "buy"
+            if closing:
+                pos_side = "Short" if order_is_buy else "Long"
+            else:
+                pos_side = "Long" if order_is_buy else "Short"
             out.append({
                 "coin": t.get("asset", ""),
-                "dir": f"{'Close' if closing else 'Open'} {side}",
+                "dir": f"{'Close' if closing else 'Open'} {pos_side}",
                 "px": t.get("price"), "sz": t.get("quantity"),
                 "fee": t.get("fee"), "closedPnl": t.get("realizedPnl"),
                 "time": ts,
+                # One logical close is frequently SPLIT across several trade
+                # rows sharing an orderId (a 3.468 BCH close arrived as
+                # 0.493 + 1.196 + 1.779). Anything matching fills to a booked
+                # trade must aggregate by this, or it sees only fragments.
+                "oid": t.get("orderId"),
             })
         return out

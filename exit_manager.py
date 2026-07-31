@@ -29,6 +29,12 @@ EPS = 1e-9
 # genuinely-gone position at its stop estimate (when the actual fill never
 # indexes). Only reached on successful reads — failed reads return None upstream.
 _RECONCILE_ESTIMATE_AFTER = 8
+# A position the exchange has NEVER once confirmed open is a different failure:
+# the entry reported a fill but no position ever materialised. Booking a PnL for
+# it fabricates a loss out of nothing, so it is voided (no trade record) rather
+# than booked — and only after a much longer wait, because voiding is
+# destructive if the position turns out to be real but unreadable.
+_RECONCILE_VOID_AFTER = 30
 
 
 class ExitManager:
@@ -38,6 +44,7 @@ class ExitManager:
         self.pm = position_manager  # for paper realized-equity bookkeeping
         self._gone_streak = {}      # coin -> consecutive 'absent w/o fill' reconcile passes
         self._orphan_warned = {}    # coin -> qty we've already alarmed about
+        self._seen_live = set()     # coins the exchange has CONFIRMED open at least once
 
     # ── per-position trailing management ───────────────────────
     def manage(self, pos: dict, price: float):
@@ -340,6 +347,7 @@ class ExitManager:
         for pos in open_db:
             coin = pos["coin"].upper()
             if coin in live_coins:
+                self._seen_live.add(coin)
                 self._gone_streak.pop(coin, None)
                 continue
             stop = pos["trail_stop"] if pos["trail_stop"] is not None else pos["hard_stop"]
@@ -350,18 +358,81 @@ class ExitManager:
                 logger.info(f"reconcile: {coin} closed on exchange — actual fill ${fill_px:.6f}")
                 self.close_position(pos, fill_px=fill_px, reason=reason, fee=fee, intended_exit=stop)
                 self._gone_streak.pop(coin, None)
+                self._seen_live.discard(coin)
                 continue
-            # Absent from a CONFIRMED read but the fill hasn't surfaced yet.
-            # Debounce, then book at the stop estimate as a last resort.
             n = self._gone_streak.get(coin, 0) + 1
             self._gone_streak[coin] = n
+
+            # ── Case 1: the exchange NEVER confirmed this position open. ──
+            # The entry order reported a fill, but no position ever appeared —
+            # and the emergency flatten typically came back
+            # 13065 position_not_found_or_not_open. There is no evidence a
+            # position ever existed, so there is no PnL to book. Booking one
+            # anyway is what produced eight fabricated -10% closes.
+            if coin not in self._seen_live:
+                if n < _RECONCILE_VOID_AFTER:
+                    if n == 1 or n % 10 == 0:
+                        logger.error(f"reconcile: {coin} was NEVER confirmed open on the exchange "
+                                     f"(streak {n}/{_RECONCILE_VOID_AFTER}) — not booking a close. "
+                                     f"Entry reported a fill but no position materialised.")
+                    continue
+                self._void_position(pos, n)
+                continue
+
+            # ── Case 2: confirmed open, then gone — a genuine close whose fill
+            # never indexed. Estimate it, but never at a price the market has
+            # not actually traded through. ──
             if n < _RECONCILE_ESTIMATE_AFTER:
                 logger.warning(f"reconcile: {coin} absent from exchange, fill not indexed yet "
                                f"(streak {n}/{_RECONCILE_ESTIMATE_AFTER}) — waiting for the fill.")
                 continue
+            est_px, basis = self._estimate_exit(pos, stop)
+            if basis == "mark":
+                reason = "RECONCILED"
             logger.warning(f"reconcile: {coin} absent for {n} confirmed reads with no fill "
-                           f"— booking at stop estimate ${stop:.6f}.")
-            tg_notify(f"ℹ️ {coin} booked closed at stop estimate ${stop:.4f} — the exchange "
+                           f"— booking at {basis} estimate ${est_px:.6f}.")
+            tg_notify(f"ℹ️ {coin} booked closed at {basis} estimate ${est_px:.4f} — the exchange "
                       f"confirmed it's gone but the exact fill never indexed.", level="info")
-            self.close_position(pos, fill_px=stop, reason=reason, intended_exit=stop)
+            self.close_position(pos, fill_px=est_px, reason=reason, intended_exit=stop)
             self._gone_streak.pop(coin, None)
+            self._seen_live.discard(coin)
+
+    def _estimate_exit(self, pos, stop):
+        """Best available exit price when the real fill never indexed.
+
+        Returns (price, basis). The old code always assumed the stop level,
+        which for a position that never armed its trail is the full hard stop —
+        exactly -10%. That is only defensible if the market actually reached it.
+        When the live mark is still on the safe side of the stop, a stop fill
+        never happened and the mark is the honest estimate.
+        """
+        is_long = pos["side"] == "long"
+        try:
+            mark = self.client.get_price(pos["coin"])
+        except Exception:
+            mark = None
+        if not mark or mark <= 0 or stop is None:
+            return stop, "stop"
+        crossed = (mark <= stop) if is_long else (mark >= stop)
+        return (stop, "stop") if crossed else (mark, "mark")
+
+    def _void_position(self, pos, n):
+        """Drop a position the exchange never confirmed, WITHOUT booking PnL.
+
+        No trade row is written: an invented fill would corrupt realized PnL,
+        the equity curve and the win-rate stats all at once. A VOID marker goes
+        to the dashboard timeline so the gap is visible rather than silent.
+        """
+        coin = pos["coin"].upper()
+        self.db.delete_position(coin)
+        self._gone_streak.pop(coin, None)
+        append_jsonl(TRADE_LOG, {
+            "action": "VOID", "type": "NO_POSITION", "asset": coin,
+            "side": pos["side"], "label": f"VOID {coin} (never opened)",
+        })
+        logger.error(f"🗑 reconcile: VOIDING {coin} — {n} confirmed reads and the exchange never "
+                     f"showed this position. Dropped from the book with NO trade booked "
+                     f"(entry ${pos['entry']:.6f}). Verify on the venue.")
+        tg_notify(f"🗑 *{coin} VOIDED* — the entry reported a fill but the exchange never showed "
+                  f"a position across {n} reads.\nDropped from the book with *no PnL booked*. "
+                  f"Check the venue to confirm you are genuinely flat in {coin}.", level="warn")
