@@ -6,7 +6,7 @@ Logging setup, Telegram notifier, JSON state helpers.
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -58,6 +58,17 @@ def iso() -> str:
 def utc_date_str() -> str:
     """Today's UTC date as YYYY-MM-DD."""
     return now_utc().strftime("%Y-%m-%d")
+
+def next_utc_reset(from_ts: datetime = None) -> datetime:
+    """The next UTC midnight — when the daily halt lifts.
+
+    maybe_reset_daily() clears daily_halt as soon as last_reset no longer
+    matches utc_date_str(), so the halt ends at 00:00 UTC, picked up on the
+    first tick after it. This is the instant the dashboard counts down to.
+    """
+    t = from_ts or now_utc()
+    return (t.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1))
 
 
 # ─── JSON state helpers ─────────────────────────────────────────

@@ -21,7 +21,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 import config
 from config import BASE_DIR, EQUITY_LOG, TRADE_LOG, STATUS_FILE, summary as config_summary
-from utils import tail_jsonl, load_json, iso
+from utils import tail_jsonl, load_json, iso, next_utc_reset, now_utc
 
 logger = logging.getLogger("api")
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
@@ -134,6 +134,11 @@ def api_stats():
         "open_positions": open_n,
         "max_concurrent": config.MAX_CONCURRENT,
         "daily_halt": st.get("daily_halt", False),
+        # Computed here rather than read from the status file so the countdown
+        # stays correct even if the writer is wedged — a halted bot that has
+        # stopped ticking is exactly when you most want to know the reset time.
+        "daily_reset_at": next_utc_reset().isoformat(),
+        "seconds_to_reset": max(0, int((next_utc_reset() - now_utc()).total_seconds())),
         "closed_trades": n,
         "win_rate": round(wins / n * 100, 2) if n else None,
         "avg_net_pct": round(avg_net, 4),

@@ -31,7 +31,7 @@ try:
     import time
     from datetime import datetime, timezone
 
-    from utils import setup_logging, iso, save_json, tg_notify
+    from utils import setup_logging, iso, save_json, tg_notify, next_utc_reset
     setup_logging()
     logger = logging.getLogger("app")
     print("[boot] utils + logging OK", flush=True)
@@ -164,6 +164,10 @@ def _write_status(db, pm, equity, total_upnl, marks):
         "max_concurrent": pm.max_concurrent,
         "daily_halt": bool(acct["daily_halt"]),
         "daily_baseline": acct["daily_baseline"],
+        # When the halt lifts. Always published (not only while halted) so the
+        # dashboard can show "resumes in ..." without guessing the boundary.
+        "daily_reset_at": next_utc_reset().isoformat(),
+        "last_reset": acct.get("last_reset"),
         "positions": positions,
         "challenge": _challenge_snapshot(pm, db),
     })

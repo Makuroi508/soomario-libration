@@ -494,6 +494,25 @@ async function api(path){
 const fmt$ = v => (v==null||isNaN(v)) ? '—' : '$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtPct = v => (v==null||isNaN(v)) ? '—' : (v>=0?'+':'')+Number(v).toFixed(2)+'%';
 
+// ── daily-halt countdown ──────────────────────────────────────
+// The halt lifts when the UTC date rolls over (maybe_reset_daily clears
+// daily_halt on the first tick after 00:00 UTC). Ticks once a second off the
+// stored target, so it stays live between status polls.
+function renderHaltSub(){
+  const h = window.__halt, el = document.getElementById('sDDSub');
+  if(!h || !el) return;
+  if(!h.on){ el.textContent = 'halt at -'+h.lim+'% / UTC day'; return; }
+  if(!h.at){ el.textContent = 'HALTED — resumes at 00:00 UTC'; return; }
+  const ms = new Date(h.at) - new Date();
+  if(ms <= 0){ el.textContent = 'HALTED — resuming on the next tick'; return; }
+  const t = Math.floor(ms/1000);
+  const hh = Math.floor(t/3600), mm = Math.floor((t%3600)/60), ss = t%60;
+  const local = new Date(h.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  el.textContent = 'HALTED — resumes in '
+    + (hh?hh+'h ':'') + mm + 'm ' + String(ss).padStart(2,'0') + 's · ' + local + ' local';
+}
+setInterval(renderHaltSub, 1000);
+
 /* ── tabs ── */
 function showTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on', t.id==='tab-'+name));
@@ -539,9 +558,13 @@ async function loadStatus(){
   const sDD=document.getElementById('sDD'); sDD.textContent=fmtPct(dPct);
   sDD.className='scard-v '+(dPct>=0?'up':'down');
   const scDD=document.getElementById('scDD');
-  if(s.daily_halt){ scDD.className='scard warn'; document.getElementById('sDDSub').textContent='HALTED — no new entries until UTC rollover'; }
-  else { scDD.className='scard'; document.getElementById('sDDSub').textContent=
-      'halt at -'+(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')+'% / UTC day'; }
+  scDD.className = s.daily_halt ? 'scard warn' : 'scard';
+  // Keep the halt state where the 1s ticker can see it. "until UTC rollover"
+  // is accurate but useless when you want to know whether that is in ten
+  // minutes or ten hours — so render an actual countdown plus a local time.
+  window.__halt = {on:!!s.daily_halt, at:s.daily_reset_at||null,
+    lim:(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')};
+  renderHaltSub();
   const maxc=s.max_concurrent||10, opn=s.open_positions||0;
   document.getElementById('sConc').textContent=opn+' / '+maxc;
   document.getElementById('hGauge').innerHTML=Array.from({length:maxc},(_,i)=>`<i class="${i<opn?'f':''}"></i>`).join('');
