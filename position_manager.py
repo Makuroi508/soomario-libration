@@ -160,6 +160,8 @@ class PositionManager:
             return None
         if not config.ENTRIES_ENABLED:
             self.db.log_miss(coin, signal, "entries_disabled"); return None
+        if self.db.max_dd_halt():
+            self.db.log_miss(coin, signal, "max_dd_halt"); return None
         if self.db.daily_halt():
             self.db.log_miss(coin, signal, "daily_dd_halt"); return None
         if self.db.has_open_position(coin):
@@ -418,15 +420,20 @@ class PositionManager:
         if eq > floor:
             return
         dd = (anchor - eq) / anchor * 100
-        if not self.db.daily_halt():
-            self.db.set_account(daily_halt=1)
+        # Own flag, NOT daily_halt: reset_daily_baseline() clears daily_halt at
+        # every UTC rollover, which re-armed entries under a breached max
+        # drawdown. The bot then opened positions and this guard flattened them
+        # on the next tick — round trips lasting 0m, paying both fees each time.
+        if not self.db.max_dd_halt():
+            self.db.set_account(max_dd_halt=1, daily_halt=1)
             logger.error(f"🚨 MAX DD GUARD: equity ${eq:.2f} <= floor ${floor:.2f} "
                          f"({dd:.2f}% below {dd_type} anchor ${anchor:.2f}; "
                          f"venue limit {max_dd}%) — flattening and pausing")
             tg_notify(f"🚨 *MAX DRAWDOWN GUARD* — {dd:.2f}% below the {dd_type} "
                       f"anchor (venue limit {max_dd}%).\n"
-                      f"Flattening everything. This limit does NOT reset at midnight — "
-                      f"set ENTRIES_ENABLED=0 and review before resuming.", level="warn")
+                      f"Flattening everything and blocking entries. This does NOT reset "
+                      f"at midnight; clear it with CLEAR_MAX_DD_HALT=1 once you have "
+                      f"reviewed.", level="warn")
         if self.db.open_positions():
             self.flatten_all(exit_manager, reason="MAX_DD_GUARD")
 

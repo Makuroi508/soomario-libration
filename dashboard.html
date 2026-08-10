@@ -558,13 +558,23 @@ async function loadStatus(){
   const sDD=document.getElementById('sDD'); sDD.textContent=fmtPct(dPct);
   sDD.className='scard-v '+(dPct>=0?'up':'down');
   const scDD=document.getElementById('scDD');
-  scDD.className = s.daily_halt ? 'scard warn' : 'scard';
-  // Keep the halt state where the 1s ticker can see it. "until UTC rollover"
-  // is accurate but useless when you want to know whether that is in ten
-  // minutes or ten hours — so render an actual countdown plus a local time.
-  window.__halt = {on:!!s.daily_halt, at:s.daily_reset_at||null,
-    lim:(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')};
-  renderHaltSub();
+  scDD.className = (s.daily_halt || s.max_dd_halt) ? 'scard warn' : 'scard';
+  // The max-DD halt outranks the daily one: it does not lift at midnight, so a
+  // countdown would be a lie. Say what it actually takes to resume.
+  if(s.max_dd_halt){
+    // Outranks the daily halt: it does not lift at midnight, so a countdown
+    // would be a lie. Say what it actually takes to resume.
+    window.__halt = null;
+    document.getElementById('sDDSub').textContent =
+      'MAX DRAWDOWN HALT — permanent · clear with CLEAR_MAX_DD_HALT=1';
+  } else {
+    // Keep the halt state where the 1s ticker can see it. "until UTC rollover"
+    // is accurate but useless when you want to know whether that is in ten
+    // minutes or ten hours — so render an actual countdown plus a local time.
+    window.__halt = {on:!!s.daily_halt, at:s.daily_reset_at||null,
+      lim:(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')};
+    renderHaltSub();
+  }
   const maxc=s.max_concurrent||10, opn=s.open_positions||0;
   document.getElementById('sConc').textContent=opn+' / '+maxc;
   document.getElementById('hGauge').innerHTML=Array.from({length:maxc},(_,i)=>`<i class="${i<opn?'f':''}"></i>`).join('');

@@ -177,6 +177,7 @@ def _write_status(db, pm, equity, total_upnl, marks):
         "open_positions": len(positions),
         "max_concurrent": pm.max_concurrent,
         "daily_halt": bool(acct["daily_halt"]),
+        "max_dd_halt": bool(acct.get("max_dd_halt")),
         "daily_baseline": acct["daily_baseline"],
         # When the halt lifts. Always published (not only while halted) so the
         # dashboard can show "resumes in ..." without guessing the boundary.
@@ -331,6 +332,15 @@ def run_worker():
     # read made live positions look closed). Gated by env REPAIR_PHANTOM_CLOSES=1;
     # only deletes a "closed" trade when that coin is STILL OPEN on the exchange,
     # which proves the close was fabricated. Remove the env var after one run.
+    # The max-drawdown halt is deliberately permanent — it is the limit that
+    # ends a challenge, so nothing clears it automatically. This is the
+    # documented way back in after a human has reviewed. Remove the env var
+    # after one boot or it clears the halt on every restart.
+    if os.getenv("CLEAR_MAX_DD_HALT") == "1":
+        db.set_account(max_dd_halt=0, daily_halt=0)
+        logger.warning("⚠️  CLEAR_MAX_DD_HALT=1 — max-drawdown halt cleared. "
+                       "REMOVE this env var now.")
+        tg_notify("⚠️ Max-drawdown halt manually cleared. Trading may resume.", level="warn")
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
     if os.getenv("REBUILD_CURVE") == "1":

@@ -90,6 +90,12 @@ class DB:
             ("trades", "fee", "REAL"),
             ("account", "inception", "REAL"),
             ("account", "inception_ts", "TEXT"),
+            # The max-drawdown halt needs its OWN flag. It used to reuse
+            # daily_halt, which reset_daily_baseline() clears at every UTC
+            # rollover — so the one guard that must NEVER auto-resume did,
+            # every night, and then re-flattened the positions it had just let
+            # open. Separate flag, cleared only by a human.
+            ("account", "max_dd_halt", "INTEGER DEFAULT 0"),
         ]
         for table, col, typ in adds:
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -110,6 +116,11 @@ class DB:
 
     def daily_halt(self) -> bool:
         return bool(self.account()["daily_halt"])
+
+    def max_dd_halt(self) -> bool:
+        """Permanent halt from the max-drawdown guard. Survives the UTC daily
+        reset by design — the drawdown limit it protects does not reset either."""
+        return bool(self.account().get("max_dd_halt"))
 
     # ── positions ──────────────────────────────────────────────
     def open_positions(self) -> list[dict]:
