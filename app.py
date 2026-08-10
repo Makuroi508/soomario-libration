@@ -116,6 +116,11 @@ def _challenge_snapshot(pm, db):
         "daily_allowed": round(daily_allow, 2),
         "daily_limit_pct": v_daily,
         "daily_guard_pct": round(pm.daily_limit_pct(), 2),
+        # The card claimed "guard flattens at -X%" unconditionally, but the
+        # halt only closes the book when DAILY_FLATTEN=1 (default 0). Publish
+        # the real behaviour so the dashboard stops describing an action the
+        # bot will not take.
+        "daily_flatten": bool(config.DAILY_FLATTEN),
         "daily_floor": round(day_base * (1 - v_daily / 100), 2),
         "dd_used_pct": round(dd_used_pct, 3),
         "dd_limit_pct": max_dd,

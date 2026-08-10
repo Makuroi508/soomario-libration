@@ -595,7 +595,7 @@ function renderChallenge(c){
   const du=c.daily_used||0, da=c.daily_allowed||0, dpc=da?du/da*100:0;
   set('chalDaily','chalDailyBar','chalDailySub', dpc,
       '$'+du.toFixed(2)+' / $'+da.toFixed(2),
-      'guard flattens at -'+c.daily_guard_pct+'% · '+
+      (c.daily_flatten ? 'guard flattens at -' : 'guard halts entries at -')+c.daily_guard_pct+'% · '+
       (c.daily_is_venue ? ('venue limit '+c.daily_limit_pct+'%')
                         : ('self-imposed '+c.daily_limit_pct+'% · no venue daily rule')));
   document.getElementById('scDaily').className='scard'+(dpc>=60?' warn':'');
