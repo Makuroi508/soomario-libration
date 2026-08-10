@@ -75,7 +75,16 @@ def _challenge_snapshot(pm, db):
     if not eq or eq <= 0:
         return None
     acct = db.account()
-    init = getattr(c, "_initial_balance", None) or acct.get("inception") or eq
+    # Anchor from the SAME source the guard uses. check_max_dd() reads
+    # account.inception for a static drawdown, so the panel must too — a
+    # display anchored somewhere else tells you that you have room the guard
+    # does not agree you have. inception is captured once and persisted; a
+    # venue-declared initial balance is only a fallback.
+    init = acct.get("inception") or getattr(c, "_initial_balance", None) or eq
+    venue_init = getattr(c, "_initial_balance", None)
+    if venue_init and acct.get("inception") and abs(venue_init - acct["inception"]) > 0.01:
+        logger.warning(f"challenge: venue initial ${venue_init:.2f} disagrees with recorded "
+                       f"inception ${acct['inception']:.2f} — showing inception (guard's anchor)")
     day_base = acct.get("daily_baseline") or eq
     max_dd, dd_type = pm.dd_limit()
     # Foxify imposes NO daily loss rule -- max drawdown is the only thing that
