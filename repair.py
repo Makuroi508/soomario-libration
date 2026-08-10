@@ -130,6 +130,54 @@ def _probe_paging(client):
     print("  * = returned more than the default page; use that param to page.\n")
 
 
+def _probe_positions(client):
+    """Verify /positions accepts the params _raw_positions() now sends.
+
+    If any of them 400s, _req returns None, _raw_positions returns None, and
+    get_positions() reports a failed read — which blinds reconcile(), blocks
+    _position_id() (so no stop can ever attach) and silently strands every open
+    position. Worth proving rather than assuming.
+    """
+    import requests
+    from propr_client import BASE
+    url = f"{BASE}/accounts/{client.account_id}/positions"
+    headers = {"X-API-Key": client.api_key, "Content-Type": "application/json"}
+    print("\n── /positions param probe ──")
+    trials = [
+        None,
+        {"status": "open"},
+        {"limit": 100},
+        {"offset": 0},
+        {"status": "open", "limit": 100},
+        {"status": "open", "limit": 100, "offset": 0},   # what the client sends
+        {"status": "open", "limit": 100, "offset": 100},
+    ]
+    for p in trials:
+        label = "(no params)" if p is None else ", ".join(f"{k}={v}" for k, v in p.items())
+        try:
+            r = requests.get(url, headers=headers, params=p, timeout=20)
+        except requests.RequestException as e:
+            print(f"  {label:<44} -> ERR {type(e).__name__}")
+            continue
+        if r.status_code in (200, 201):
+            try:
+                rows = r.json().get("data", [])
+                opens = [x for x in rows if str(x.get("status", "")).lower() == "open"
+                         and float(x.get("quantity") or 0) != 0]
+                coins = ",".join(sorted({str(x.get("asset")) for x in opens}))[:40]
+                print(f"  {label:<44} -> 200  {len(rows):>3} rows, {len(opens):>2} open  {coins}")
+            except ValueError:
+                print(f"  {label:<44} -> 200  (non-JSON)")
+        else:
+            try:
+                msg = str(r.json().get("message", ""))[:45]
+            except ValueError:
+                msg = r.text[:45]
+            print(f"  {label:<44} -> {r.status_code}  {msg}   <-- REJECTED")
+    print("  The client sends status+limit+offset. If that row is rejected, the bot")
+    print("  cannot see its own positions and no stop can ever attach.\n")
+
+
 # ── --inspect ───────────────────────────────────────────────────
 def inspect(client):
     """Dump the raw venue trade payload so the field mapping can be verified."""
@@ -152,6 +200,7 @@ def inspect(client):
         times = sorted(str(r.get("executedAt") or "") for r in rows)
         print(f"span: {times[0]} .. {times[-1]}")
     _probe_paging(client)
+    _probe_positions(client)
     if not rows:
         return
     print(f"\nkeys: {sorted(rows[0].keys())}\n")
