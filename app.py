@@ -1,5 +1,5 @@
 """
-Soomario Libration — Entry point
+Soomario Elite — Entry point
 ═════════════════════════════════
 Flask dashboard on the main thread; a daemon worker that ticks every
 POLL_SECONDS. Same failure posture as Aphelion:
@@ -21,7 +21,7 @@ import sys
 import traceback
 
 print("=" * 60, flush=True)
-print("LIBRATION — BOOT TRACE", flush=True)
+print("SOOMARIO ELITE — BOOT TRACE", flush=True)
 print(f"  python: {sys.version}", flush=True)
 print("=" * 60, flush=True)
 
@@ -291,7 +291,7 @@ def _rebuild_logs_from_ledger(db):
 def run_worker():
     time.sleep(3)  # let Flask bind first
     logger.info("═" * 60)
-    logger.info(f"  LIBRATION WORKER STARTING — {config_summary()}")
+    logger.info(f"  ELITE WORKER STARTING — {config_summary()}")
     logger.info("═" * 60)
 
     if config.EXCHANGE == "propr":
@@ -523,7 +523,7 @@ def tick(hl, db, pm, em, shadow):
 
 def main():
     logger.info("═" * 60)
-    logger.info(f"  LIBRATION launching — ts={iso()}")
+    logger.info(f"  ELITE launching — ts={iso()}")
     logger.info("═" * 60)
     t = threading.Thread(target=run_worker, daemon=True, name="libration-worker")
     t.start()
