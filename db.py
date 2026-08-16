@@ -63,6 +63,11 @@ _DB_READY_LOGGED = False
 class DB:
     def __init__(self, path=None):
         self.path = str(path or DB_PATH)
+        # Per-venue books live under STATE_DIR/<venue>/ and the shared signal
+        # DB under STATE_DIR/signals/; sqlite will not create missing parent
+        # directories, so make them here. Harmless when they already exist.
+        import os as _os
+        _os.makedirs(_os.path.dirname(self.path) or ".", exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
