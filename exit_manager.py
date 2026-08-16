@@ -17,7 +17,7 @@ PAPER: there is no exchange, so manage() also detects a stop crossing and books
 the close itself, idealized at the stop level.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import config
 from utils import iso, append_jsonl, tg_notify
@@ -70,6 +70,26 @@ class ExitManager:
             else:
                 logger.error(f"❌ {coin}: still UNPROTECTED — stop placement rejected again")
 
+        # ── Pine-parity arming delay ────────────────────────────
+        # The TV strategies this mirrors cannot arm on the entry bar, and the
+        # elite A/B showed immediate arming losing 12/12 on real data (see
+        # config.TRAIL_ARM_DELAY_BARS). Until the delay passes: no peak
+        # tracking, no arming, no trail moves. Peak is RESET to the current
+        # price so the trail starts from where the market is when it goes
+        # live, not from an extreme printed while it did not exist. The hard
+        # stop above and the stop backstops below stay fully active.
+        if self._in_arm_delay(pos):
+            if pos["peak"] != price:
+                updates["peak"] = price
+            if updates:                    # may also carry hard_stop_id from above
+                pos = {**pos, **updates}
+                self.db.update_position(coin, **updates)
+            if config.PAPER:
+                self._paper_check_stop(pos, price)
+            else:
+                self._live_stop_backstop(pos, price)
+            return
+
         # Track the favorable extreme: max price for long, min price for short.
         if is_long:
             peak = max(pos["peak"], price)
@@ -116,6 +136,27 @@ class ExitManager:
             self._paper_check_stop(pos, price)
         else:
             self._live_stop_backstop(pos, price)
+
+    def _in_arm_delay(self, pos) -> bool:
+        """True while the position is younger than TRAIL_ARM_DELAY_SEC.
+
+        Fails OPEN (no delay) on a missing or unparseable opened_at: for an
+        adopted orphan with no timestamp, managing the trail immediately is the
+        pre-existing behaviour and strictly safer than never arming at all.
+        """
+        if config.TRAIL_ARM_DELAY_SEC <= 0:
+            return False
+        raw = pos.get("opened_at")
+        if not raw:
+            return False
+        try:
+            opened = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        age = (datetime.now(timezone.utc) - opened).total_seconds()
+        return age < config.TRAIL_ARM_DELAY_SEC
 
     def _live_stop_backstop(self, pos, price):
         """LIVE safety net: never let a position survive past its stop just
