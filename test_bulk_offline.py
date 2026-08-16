@@ -130,6 +130,12 @@ fake.positions = []
 pos = pm.maybe_enter("SOL", "long", 200.0)
 check("entry booked with sentinel stop", pos is not None and pos["hard_stop_id"] == bc.BACKSTOP_SENTINEL)
 fake.positions = [{"symbol":"SOL-USD","size":str(pos["qty"]),"side":"long","entryPx":str(pos["entry"])}]
+# Elite's exit manager holds the trail one full bar after entry (Pine-parity
+# arming delay); age the position past the delay before expecting arming.
+from datetime import datetime, timezone, timedelta
+_aged = (datetime.now(timezone.utc)
+         - timedelta(seconds=config.TRAIL_ARM_DELAY_SEC + 60)).isoformat()
+db.update_position("SOL", opened_at=_aged)
 em.manage(db.open_positions()[0], 200.0 * 1.02)   # arm trail
 check("trail armed", bool(db.open_positions()[0]["trail_active"]))
 fake.posts.clear()
