@@ -3,3 +3,8 @@ requests>=2.31
 python-dotenv>=1.0
 hyperliquid-python-sdk>=0.22.0
 eth-account>=0.13.0
+# Solana venues (Pacifica / Bulk)
+base58>=2.1
+solders>=0.21
+bulk-keychain>=0.1.19
+pynacl>=1.5
