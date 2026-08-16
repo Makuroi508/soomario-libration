@@ -52,7 +52,6 @@ class PositionManager:
         if not live:   # None (failed read) or [] (genuinely flat) → nothing to adopt
             return
         known = {p["coin"].upper() for p in self.db.open_positions()}
-        hs = config.HARD_STOP_PCT / 100.0
         adopted = 0
         for p in live:
             coin = short_name(str(p.get("coin", ""))).upper()
@@ -67,6 +66,7 @@ class PositionManager:
             if szi == 0 or entry <= 0 or qty <= 0:
                 continue
             side = "long" if szi > 0 else "short"
+            hs = config.hard_stop_pct(coin) / 100.0
             hard = entry * (1 - hs) if side == "long" else entry * (1 + hs)
             notional = entry * qty
             self.db.insert_position(dict(
@@ -198,8 +198,9 @@ class PositionManager:
             # a stop that exists is worth more than one that is exact.
             order = None
             if hasattr(self.client, "market_open_with_stop"):
-                pre_stop = price * (1 - config.HARD_STOP_PCT / 100) if is_long \
-                    else price * (1 + config.HARD_STOP_PCT / 100)
+                _hs = config.hard_stop_pct(coin)
+                pre_stop = price * (1 - _hs / 100) if is_long \
+                    else price * (1 + _hs / 100)
                 order = self.client.market_open_with_stop(
                     coin, is_long, notional, pre_stop, current_price=price)
             if order is None:
@@ -210,9 +211,10 @@ class PositionManager:
             avg = float(order["avg_price"])
             qty = float(order["total_size"])
 
-        # ── hard stop, placed immediately (10%) ──
-        stop_px = avg * (1 - config.HARD_STOP_PCT / 100) if is_long \
-            else avg * (1 + config.HARD_STOP_PCT / 100)
+        # ── hard stop, placed immediately (per-coin, default 10%) ──
+        _hs = config.hard_stop_pct(coin)
+        stop_px = avg * (1 - _hs / 100) if is_long \
+            else avg * (1 + _hs / 100)
         if not config.PAPER and (order or {}).get("stop_oid"):
             # The group already attached it — no second call, no race.
             stop_id = order["stop_oid"]

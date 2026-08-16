@@ -481,7 +481,8 @@ def tick(hl, db, pm, em, shadow):
                 continue
             if not signals.new_closed_bar(seen, last_ts):
                 continue  # already evaluated this bar — no double-fire
-            sig = signals.entry_signal(rsi[-2], rsi[-1], config.LONG_LEVEL, config.SHORT_LEVEL)
+            sig = signals.entry_signal(rsi[-2], rsi[-1],
+                                       config.long_level(coin), config.short_level(coin))
             if sig:
                 price = marks.get(coin) or closes[-1]
                 pos = pm.maybe_enter(coin, sig, price)

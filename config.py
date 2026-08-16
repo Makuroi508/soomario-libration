@@ -111,6 +111,97 @@ RSI_TF        = os.getenv("RSI_TF", "4h")
 LONG_LEVEL    = _f("LONG_LEVEL", 50)     # crossover up  -> long
 SHORT_LEVEL   = _f("SHORT_LEVEL", 40)    # crossunder down -> short
 TRAIL_PCT     = _f("TRAIL_PCT", 0.55)    # activate +0.55%, trail 0.55% behind peak
+# How many FULL bars after entry before the trail may arm. The TradingView
+# strategies this book mirrors cannot arm on the entry bar (strategy.exit sits
+# inside `if strategy.position_size != 0`, which is still 0 when the entry
+# bar's script body runs), so every position gets one bar to breathe. The
+# soomario-elite A/B tested arming-immediately against this on real 1m/1s
+# data: immediate arming LOST in all 12 coin x venue combinations -- e.g.
+# HYPE +84% vs -21% at measured fees. A 0.55% trail sits inside ordinary bar
+# noise; armed at once, it converts normal adverse excursion into exits.
+# The 10% hard stop is NOT delayed -- it rests from entry as before. That is
+# a deliberate safety deviation from Pine (which has no stop on the entry bar
+# either): a 10% stop almost never fires inside one 4h bar in backtest, and
+# live it is the only protection against a crash while the trail is unarmed.
+TRAIL_ARM_DELAY_BARS = _i("TRAIL_ARM_DELAY_BARS", 1)
+_TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+               "1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800, "1d": 86400}
+BAR_SECONDS = _TF_SECONDS.get(RSI_TF, 14400)
+TRAIL_ARM_DELAY_SEC = TRAIL_ARM_DELAY_BARS * BAR_SECONDS
+
+# ─── Per-coin parameter overrides ───────────────────────────────
+# One strategy, one codebase; a coin that has earned different numbers gets
+# them here instead of forking the bot. JSON env, keys are coins, values
+# override long_level / short_level / trail_pct / hard_stop_pct /
+# arm_delay_min; anything not named inherits the frozen set above.
+#
+# arm_delay_min is the per-coin trail arming delay in MINUTES -- the live
+# equivalent of the TradingView chart timeframe, since Pine's exit orders go
+# live one CHART bar after entry. 30 = a 30m chart, default (absent) = one
+# RSI_TF bar (240 on 4h). A per-coin value always wins over the global.
+#
+# The defaults below are the soomario-elite grid result of 2026-08-16:
+# 330 runs (22 coins x 3 arming delays x 5 trails) on real 1m data at the
+# fee rate measured from this account's own fills, winners filtered by
+# split-half stability and plateau (not single-spike) behaviour.
+#
+#   unchanged, omitted -> frozen set:  HYPE, SOL, ONDO
+#   trail only:    KPEPE 0.40   SUI 1.00   LINK 0.75
+#   fast arming:   FARTCOIN 30m/0.75   JTO 30m/0.75
+#                  PENGU 30m/1.00      XMR 30m/1.00
+#   CC:            50/65 straddle, 0.20 trail, 10.5 stop (shorts fire on a
+#                  crossunder through 65 -- above the long level, not a typo)
+#
+# The four fast-arming additions (JTO, PENGU, XMR, FARTCOIN's new config)
+# have no live-fill corroboration yet -- run them at reduced size or PAPER
+# for a probation period. XMR's edge lives in the 1.00 trail column alone;
+# it is the most fragile of the set.
+import json as _json
+_COIN_PARAMS_DEFAULT = (
+    '{'
+    '"CC":       {"short_level": 65, "trail_pct": 0.20, "hard_stop_pct": 10.5},'
+    '"KPEPE":    {"trail_pct": 0.40},'
+    '"SUI":      {"trail_pct": 1.00},'
+    '"LINK":     {"trail_pct": 0.75},'
+    '"FARTCOIN": {"trail_pct": 0.75, "arm_delay_min": 30},'
+    '"JTO":      {"trail_pct": 0.75, "arm_delay_min": 30},'
+    '"PENGU":    {"trail_pct": 1.00, "arm_delay_min": 30},'
+    '"XMR":      {"trail_pct": 1.00, "arm_delay_min": 30}'
+    '}'
+)
+try:
+    COIN_PARAMS = {str(k).upper(): dict(v) for k, v in
+                   _json.loads(os.getenv("COIN_PARAMS", _COIN_PARAMS_DEFAULT) or "{}").items()}
+except (ValueError, TypeError, AttributeError):
+    print("⚠ COIN_PARAMS is not valid JSON -- ignoring all per-coin overrides")
+    COIN_PARAMS = {}
+
+
+def _coin_param(coin, key, default):
+    try:
+        return float(COIN_PARAMS.get(str(coin).upper(), {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def long_level(coin):    return _coin_param(coin, "long_level", LONG_LEVEL)
+
+
+def arm_delay_sec(coin):
+    """Per-coin trail arming delay in seconds. arm_delay_min overrides the
+    global; the global TRAIL_ARM_DELAY_BARS=0 kill-switch only disables coins
+    without an explicit override."""
+    ov = COIN_PARAMS.get(str(coin).upper(), {}).get("arm_delay_min")
+    if ov is not None:
+        try:
+            return float(ov) * 60.0
+        except (TypeError, ValueError):
+            pass
+    return TRAIL_ARM_DELAY_SEC
+
+def short_level(coin):   return _coin_param(coin, "short_level", SHORT_LEVEL)
+def trail_pct(coin):     return _coin_param(coin, "trail_pct", TRAIL_PCT)
+def hard_stop_pct(coin): return _coin_param(coin, "hard_stop_pct", HARD_STOP_PCT)
 HARD_STOP_PCT = _f("HARD_STOP_PCT", 10)  # native resting trigger; never moved against
 DAILY_DD_PCT  = _f("DAILY_DD_PCT", 5)    # halt new entries once down 5% on the UTC day
 # Halting only stops digging — open positions keep bleeding toward the venue's
