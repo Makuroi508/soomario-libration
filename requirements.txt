@@ -6,5 +6,9 @@ eth-account>=0.13.0
 # Solana venues (Pacifica / Bulk)
 base58>=2.1
 solders>=0.21
-bulk-keychain>=0.1.19
+# PINNED: 0.1.20+ made Signer(signature_domain) a required argument and
+# breaks bulk_client (written and tested against 0.1.19). BULK mainnet has
+# not started; when it does, upgrade deliberately and pass the correct
+# signature_domain rather than letting the floor float onto an API break.
+bulk-keychain==0.1.19
 pynacl>=1.5

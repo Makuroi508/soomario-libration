@@ -118,6 +118,9 @@ class BulkClient:
             return False
         try:
             kp = Keypair.from_base58(self._priv)
+            # bulk-keychain is PINNED to 0.1.19 in requirements: 0.1.20+
+            # requires Signer(kp, signature_domain=...) and the right domain
+            # value is a BULK-mainnet decision, not a guess. Revisit at launch.
             self._signer = Signer(kp)
             signer_pub = kp.pubkey if isinstance(kp.pubkey, str) else str(kp.pubkey)
         except Exception as e:
