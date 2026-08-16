@@ -139,13 +139,14 @@ class ExitManager:
             self._live_stop_backstop(pos, price)
 
     def _in_arm_delay(self, pos) -> bool:
-        """True while the position is younger than TRAIL_ARM_DELAY_SEC.
+        """True while the position is younger than its coin's arming delay.
 
         Fails OPEN (no delay) on a missing or unparseable opened_at: for an
         adopted orphan with no timestamp, managing the trail immediately is the
         pre-existing behaviour and strictly safer than never arming at all.
         """
-        if config.TRAIL_ARM_DELAY_SEC <= 0:
+        delay = config.arm_delay_sec(pos.get("coin"))
+        if delay <= 0:
             return False
         raw = pos.get("opened_at")
         if not raw:
@@ -157,7 +158,7 @@ class ExitManager:
         except ValueError:
             return False
         age = (datetime.now(timezone.utc) - opened).total_seconds()
-        return age < config.TRAIL_ARM_DELAY_SEC
+        return age < delay
 
     def _live_stop_backstop(self, pos, price):
         """LIVE safety net: never let a position survive past its stop just
