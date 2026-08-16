@@ -163,14 +163,16 @@ def api_universe():
     it (Universe tab); absent on a fresh deploy."""
     HOT_BAND, WARM_BAND = 1.5, 3.0  # RSI points to a boundary (presentation tuning)
 
-    def heat(rsi):
+    def heat(rsi, coin=None):
         if rsi is None:
             return "dormant"
-        # distance below 50 (long brewing) or above 40 (short brewing)
-        for d in (config.LONG_LEVEL - rsi, rsi - config.SHORT_LEVEL):
+        # distance below the long level (long brewing) or above the short
+        # level (short brewing) -- per-coin, so CC's 65 straddle reads right
+        ll, sl = config.long_level(coin), config.short_level(coin)
+        for d in (ll - rsi, rsi - sl):
             if 0 < d <= HOT_BAND:
                 return "hot"
-        for d in (config.LONG_LEVEL - rsi, rsi - config.SHORT_LEVEL):
+        for d in (ll - rsi, rsi - sl):
             if 0 < d <= WARM_BAND:
                 return "warming"
         return "dormant"
@@ -188,7 +190,7 @@ def api_universe():
         m = meta_map.get(sym, {})
         coins.append({
             "coin": sym,
-            "state": "active" if sym in active else heat(rsi_map.get(sym)),
+            "state": "active" if sym in active else heat(rsi_map.get(sym), sym),
             "in_position": sym in active,
             "atr_pct": m.get("atr_pct"),
             "day_vol_usd": m.get("day_vol_usd"),

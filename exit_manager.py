@@ -100,8 +100,9 @@ class ExitManager:
 
         trail_active = bool(pos["trail_active"])
         if config.TRAIL_ENABLED and not trail_active:
-            armed = price >= entry * (1 + config.TRAIL_PCT / 100) if is_long \
-                else price <= entry * (1 - config.TRAIL_PCT / 100)
+            tp = config.trail_pct(coin)
+            armed = price >= entry * (1 + tp / 100) if is_long \
+                else price <= entry * (1 - tp / 100)
             if armed:
                 trail_active = True
                 updates["trail_active"] = 1
@@ -109,7 +110,7 @@ class ExitManager:
 
         # Once armed, compute the trail level and ratchet the resting stop.
         if trail_active:
-            band = entry * (config.TRAIL_PCT / 100)
+            band = entry * (config.trail_pct(coin) / 100)
             if is_long:
                 trail = peak - band
                 new_stop = max(trail, pos["hard_stop"])
@@ -351,8 +352,9 @@ class ExitManager:
                               f"{qty} @ ${entry:.6f} is live on the exchange but the bot is not "
                               f"tracking it. Nothing is managing its risk.", level="warn")
                 continue
-            stop_px = entry * (1 - config.HARD_STOP_PCT / 100) if is_long \
-                else entry * (1 + config.HARD_STOP_PCT / 100)
+            _hs = config.hard_stop_pct(coin)
+            stop_px = entry * (1 - _hs / 100) if is_long \
+                else entry * (1 + _hs / 100)
             self.db.insert_position(dict(
                 coin=coin, side="long" if is_long else "short", entry=entry, qty=qty,
                 notional=qty * entry, margin=qty * entry / max(config.LEVERAGE, 1),

@@ -128,6 +128,42 @@ _TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                "1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800, "1d": 86400}
 BAR_SECONDS = _TF_SECONDS.get(RSI_TF, 14400)
 TRAIL_ARM_DELAY_SEC = TRAIL_ARM_DELAY_BARS * BAR_SECONDS
+
+# ─── Per-coin parameter overrides ───────────────────────────────
+# One strategy, one codebase; a coin that has earned different numbers gets
+# them here instead of forking the bot. JSON env, keys are coins, values
+# override long_level / short_level / trail_pct / hard_stop_pct; anything not
+# named inherits the frozen set above.
+#
+# The default carries CC, validated in soomario-elite on real 1m data at
+# measured fees (0.045%/fill): on ITS OWN TradingView numbers it made +108.5%
+# (PF 8.20, DD 15.3%) since listing; on the frozen set it still made +51.5%
+# (PF 1.61) -- an edge that survives parameters never fitted to it is the
+# strongest kind. Its short level sits ABOVE the long level (65 > 50): shorts
+# fire on a crossunder through 65, longs on a crossover through 50 -- a
+# straddle, not a typo. Bad JSON falls back to no overrides rather than
+# killing the bot at import.
+import json as _json
+_COIN_PARAMS_DEFAULT = '{"CC": {"short_level": 65, "trail_pct": 0.20, "hard_stop_pct": 10.5}}'
+try:
+    COIN_PARAMS = {str(k).upper(): dict(v) for k, v in
+                   _json.loads(os.getenv("COIN_PARAMS", _COIN_PARAMS_DEFAULT) or "{}").items()}
+except (ValueError, TypeError, AttributeError):
+    print("⚠ COIN_PARAMS is not valid JSON -- ignoring all per-coin overrides")
+    COIN_PARAMS = {}
+
+
+def _coin_param(coin, key, default):
+    try:
+        return float(COIN_PARAMS.get(str(coin).upper(), {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def long_level(coin):    return _coin_param(coin, "long_level", LONG_LEVEL)
+def short_level(coin):   return _coin_param(coin, "short_level", SHORT_LEVEL)
+def trail_pct(coin):     return _coin_param(coin, "trail_pct", TRAIL_PCT)
+def hard_stop_pct(coin): return _coin_param(coin, "hard_stop_pct", HARD_STOP_PCT)
 HARD_STOP_PCT = _f("HARD_STOP_PCT", 10)  # native resting trigger; never moved against
 DAILY_DD_PCT  = _f("DAILY_DD_PCT", 5)    # halt new entries once down 5% on the UTC day
 # Halting only stops digging — open positions keep bleeding toward the venue's
