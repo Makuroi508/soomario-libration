@@ -1,5 +1,5 @@
 """
-Soomario Libration — Configuration
+Soomario Elite — Configuration
 ═══════════════════════════════════════
 All params via env with validated defaults. The frozen strategy values
 (RSI 14 / 4h, cross 50 long / 40 short, 0.55% trail, 10% hard stop, 5% daily
@@ -26,7 +26,7 @@ def _b(name, default="0"):
 
 
 # ─── Paths / state ──────────────────────────────────────────────
-NAME = "Soomario Libration"
+NAME = "Soomario Elite"
 
 BASE_DIR  = Path(__file__).parent
 STATE_DIR = Path(os.getenv("STATE_PATH", str(BASE_DIR / "state")))
