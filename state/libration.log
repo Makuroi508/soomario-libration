@@ -1,0 +1,7 @@
+2026-08-17 12:08:24,590  fleet dashboard on 0.0.0.0:8931 (2 sources, poll 30s)
+2026-08-17 12:08:26,682  fleet: Ghost unreachable: HTTPSConnectionPool(host='does-not-exist.invalid', port=443): Max retries exceeded with url: /api/status (Caused by NameResolutionError("HTTPSConnection(host='does-not-exist.invalid', port=443): Failed to resolve 'does-not-exist.invalid' ([Errno 11001] getaddrinfo failed)"))
+2026-08-17 12:08:56,600  fleet: Ghost unreachable: HTTPSConnectionPool(host='does-not-exist.invalid', port=443): Max retries exceeded with url: /api/status (Caused by NameResolutionError("HTTPSConnection(host='does-not-exist.invalid', port=443): Failed to resolve 'does-not-exist.invalid' ([Errno 11001] getaddrinfo failed)"))
+2026-08-17 12:09:26,561  fleet: Ghost unreachable: HTTPSConnectionPool(host='does-not-exist.invalid', port=443): Max retries exceeded with url: /api/status (Caused by NameResolutionError("HTTPSConnection(host='does-not-exist.invalid', port=443): Failed to resolve 'does-not-exist.invalid' ([Errno 11001] getaddrinfo failed)"))
+2026-08-17 12:41:23,643  fleet dashboard on 0.0.0.0:8932 (4 sources, poll 30s)
+2026-08-17 13:45:13,596  fleet dashboard on 0.0.0.0:8933 (1 sources, poll 30s)
+2026-08-17 13:47:41,133  fleet dashboard on 0.0.0.0:8934 (4 sources, poll 30s)
