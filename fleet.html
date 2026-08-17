@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soomario Elite — Fleet</title>
+<style>
+  :root{
+    --bg:#0b0a12; --panel:#14121f; --panel2:#1b1830; --line:#262239;
+    --ink:#e8e6f2; --dim:#8f8aa8; --gold:#d9b45b; --green:#4ade80;
+    --red:#f87171; --amber:#fbbf24; --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:var(--mono);font-size:14px;line-height:1.5}
+  .wrap{max-width:1280px;margin:0 auto;padding:22px 18px 60px}
+  header{display:flex;align-items:baseline;gap:14px;margin-bottom:6px}
+  h1{font-size:17px;letter-spacing:.28em;font-weight:700;margin:0;color:var(--gold)}
+  h1 small{color:var(--dim);letter-spacing:.18em;font-weight:400;font-size:11px}
+  .polled{margin-left:auto;color:var(--dim);font-size:11px}
+  .banner{display:none;background:#2b1518;border:1px solid #7f1d1d;color:#fecaca;
+          border-radius:6px;padding:10px 14px;margin:10px 0;letter-spacing:.06em}
+  .banner.show{display:block}
+  .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+          gap:1px;background:var(--line);border:1px solid var(--line);
+          border-radius:8px;overflow:hidden;margin:14px 0 22px}
+  .tot{background:var(--panel);padding:13px 16px}
+  .tot .k{font-size:10px;letter-spacing:.22em;color:var(--dim);text-transform:uppercase}
+  .tot .v{font-size:21px;margin-top:3px;font-variant-numeric:tabular-nums}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+        padding:15px 16px;display:flex;flex-direction:column;gap:9px}
+  .card.down{border-color:#7f1d1d;background:#191016}
+  .card.warn{border-color:#78560f}
+  .chead{display:flex;align-items:center;gap:9px}
+  .cname{font-weight:700;letter-spacing:.10em}
+  .venue{color:var(--dim);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase}
+  .badge{margin-left:auto;font-size:9.5px;letter-spacing:.18em;padding:3px 8px;
+         border-radius:4px;text-transform:uppercase}
+  .b-ok{background:#10321f;color:var(--green)}
+  .b-down{background:#3f1214;color:var(--red)}
+  .b-stale{background:#3a2c0d;color:var(--amber)}
+  .b-halt{background:#3a2c0d;color:var(--amber)}
+  .row{display:flex;gap:18px;font-variant-numeric:tabular-nums}
+  .cell .k{font-size:9.5px;letter-spacing:.18em;color:var(--dim);text-transform:uppercase}
+  .cell .v{font-size:16.5px;margin-top:1px}
+  .pos{border-top:1px solid var(--line);padding-top:8px;font-size:12.5px}
+  .pos table{width:100%;border-collapse:collapse}
+  .pos td{padding:2.5px 4px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .pos td:first-child{color:var(--ink)}
+  .pos td:last-child{text-align:right}
+  .long{color:var(--green)} .short{color:var(--red)}
+  .up{color:var(--green)} .dn{color:var(--red)} .muted{color:var(--dim)}
+  .flat{color:var(--dim);font-size:12px;letter-spacing:.1em}
+  .err{color:var(--red);font-size:11.5px;word-break:break-all}
+  .age{color:var(--dim);font-size:10.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>SOOMARIO ELITE <small>FLEET</small></h1>
+    <span class="polled" id="polled">—</span>
+  </header>
+  <div class="banner" id="banner"></div>
+  <div class="totals" id="totals"></div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=(v,d=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn=v=>v==null?'muted':(v>=0?'up':'dn');
+const sfmt=v=>v==null?'—':(v>=0?'+':'')+fmt(v);
+const age=s=>s==null?'':s<90?`${Math.round(s)}s`:s<5400?`${Math.round(s/60)}m`:`${(s/3600).toFixed(1)}h`;
+
+function badge(b){
+  if(b.state==='down') return '<span class="badge b-down">down</span>';
+  if(b.state==='stale') return '<span class="badge b-stale">stale</span>';
+  if(b.state==='halted') return '<span class="badge b-halt">daily halt</span>';
+  if(b.state==='dd-halted') return '<span class="badge b-halt">dd halt</span>';
+  return '<span class="badge b-ok">live</span>';
+}
+
+function card(b){
+  const cls = b.state==='down'?'card down':(b.state==='ok'?'card':'card warn');
+  let pos='';
+  if(b.state==='down'){
+    pos=`<div class="err">${b.error||'unreachable'}</div>`;
+  }else if((b.positions||[]).length){
+    pos='<div class="pos"><table>'+b.positions.map(p=>
+      `<tr><td>${p.coin}</td><td class="${p.side}">${p.side}</td>`+
+      `<td>${p.trail_active?'trail armed':''}</td>`+
+      `<td class="${sgn(p.upnl)}">${sfmt(p.upnl)}</td></tr>`).join('')+'</table></div>';
+  }else{
+    pos='<div class="pos flat">flat</div>';
+  }
+  return `<div class="${cls}">
+    <div class="chead"><span class="cname">${b.label}</span>
+      <span class="venue">${b.exchange||''}</span>${badge(b)}</div>
+    <div class="row">
+      <div class="cell"><div class="k">equity</div><div class="v">$${fmt(b.equity)}</div></div>
+      <div class="cell"><div class="k">day p&l</div><div class="v ${sgn(b.day_pnl)}">${sfmt(b.day_pnl)}</div></div>
+      <div class="cell"><div class="k">total</div><div class="v ${sgn(b.total_pnl)}">${sfmt(b.total_pnl)}</div></div>
+      <div class="cell"><div class="k">open</div><div class="v">${b.open==null?'—':b.open}${b.max_concurrent?'/'+b.max_concurrent:''}</div></div>
+    </div>
+    ${pos}
+    <div class="age">${b.ts_age_sec!=null?'heartbeat '+age(b.ts_age_sec)+' ago':''}</div>
+  </div>`;
+}
+
+async function refresh(){
+  try{
+    const d=await (await fetch('/api/fleet')).json();
+    const t=d.totals||{};
+    $('totals').innerHTML=`
+      <div class="tot"><div class="k">combined equity</div><div class="v">$${fmt(t.equity)}</div></div>
+      <div class="tot"><div class="k">day p&l</div><div class="v ${sgn(t.day_pnl)}">${sfmt(t.day_pnl)}</div></div>
+      <div class="tot"><div class="k">total p&l</div><div class="v ${sgn(t.total_pnl)}">${sfmt(t.total_pnl)}</div></div>
+      <div class="tot"><div class="k">open positions</div><div class="v">${t.open??'—'}</div></div>
+      <div class="tot"><div class="k">books live</div><div class="v">${t.books_ok??0}/${t.books_total??0}</div></div>`;
+    $('grid').innerHTML=(d.books||[]).map(card).join('');
+    const att=t.attention||[];
+    $('banner').className = att.length?'banner show':'banner';
+    if(att.length) $('banner').textContent='NEEDS ATTENTION: '+att.join('  ·  ');
+    $('polled').textContent = d.polled_at ? ('polled '+new Date(d.polled_at).toLocaleTimeString()) : 'first poll pending…';
+  }catch(e){
+    $('banner').className='banner show';
+    $('banner').textContent='fleet API unreachable: '+e;
+  }
+}
+refresh(); setInterval(refresh, 30000);
+</script>
+</body>
+</html>
