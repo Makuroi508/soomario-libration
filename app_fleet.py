@@ -116,12 +116,17 @@ def _book_entry(label, status, stats):
 def _poll_source(label, url):
     """One deployment -> one or more fleet cards. Never raises."""
     try:
-        # A Solana fan-out service exposes /api/venues; expand per venue.
-        venues = None
+        # A fan-out service exposes /api/venues; expand into one card per
+        # venue. Live shape is a dict {"venues": [...], "labels": {...},
+        # "default": ...}; older builds returned a bare list. Accept both.
+        venues, vlabels = None, {}
         try:
             v = _get(url, "/api/venues")
             if isinstance(v, list) and v:
                 venues = [str(x) for x in v]
+            elif isinstance(v, dict) and v.get("venues"):
+                venues = [str(x) for x in v["venues"]]
+                vlabels = v.get("labels") or {}
         except Exception:
             venues = None
 
@@ -133,7 +138,8 @@ def _poll_source(label, url):
                     sx = _get(url, "/api/stats", {"venue": ven})
                 except Exception:
                     sx = {}
-                out.append(_book_entry("%s · %s" % (label, ven), st, sx))
+                out.append(_book_entry(
+                    "%s · %s" % (label, vlabels.get(ven, ven)), st, sx))
             return out
 
         st = _get(url, "/api/status")
