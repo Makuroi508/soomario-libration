@@ -6,126 +6,204 @@
 <title>Soomario Elite — Fleet</title>
 <style>
   :root{
-    --bg:#0b0a12; --panel:#14121f; --panel2:#1b1830; --line:#262239;
-    --ink:#e8e6f2; --dim:#8f8aa8; --gold:#d9b45b; --green:#4ade80;
-    --red:#f87171; --amber:#fbbf24; --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+    --bg:#0a0912; --panel:#121022; --panel2:#171430; --inset:#0d0b1a;
+    --line:#241f3d; --line2:#2e2850;
+    --ink:#eceaf6; --dim:#9691b4; --faint:#615c80;
+    --gold:#d9b45b; --gold2:#f0d18a;
+    --green:#3ddc84; --green-dim:#1d5c3c;
+    --red:#ff6b6b; --red-dim:#5c1d24;
+    --amber:#fbbf24;
+    --serif:Georgia,'Times New Roman',serif;
+    --mono:ui-monospace,'Cascadia Mono','JetBrains Mono',Consolas,monospace;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-       font-family:var(--mono);font-size:14px;line-height:1.5}
-  .wrap{max-width:1280px;margin:0 auto;padding:22px 18px 60px}
-  header{display:flex;align-items:baseline;gap:14px;margin-bottom:6px}
-  h1{font-size:17px;letter-spacing:.28em;font-weight:700;margin:0;color:var(--gold)}
-  h1 small{color:var(--dim);letter-spacing:.18em;font-weight:400;font-size:11px}
-  .polled{margin-left:auto;color:var(--dim);font-size:11px}
-  .banner{display:none;background:#2b1518;border:1px solid #7f1d1d;color:#fecaca;
-          border-radius:6px;padding:10px 14px;margin:10px 0;letter-spacing:.06em}
-  .banner.show{display:block}
-  .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-          gap:1px;background:var(--line);border:1px solid var(--line);
-          border-radius:8px;overflow:hidden;margin:14px 0 22px}
-  .tot{background:var(--panel);padding:13px 16px}
-  .tot .k{font-size:10px;letter-spacing:.22em;color:var(--dim);text-transform:uppercase}
-  .tot .v{font-size:21px;margin-top:3px;font-variant-numeric:tabular-nums}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-        padding:15px 16px;display:flex;flex-direction:column;gap:9px}
-  .card.down{border-color:#7f1d1d;background:#191016}
-  .card.warn{border-color:#78560f}
-  .chead{display:flex;align-items:center;gap:9px}
-  .cname{font-weight:700;letter-spacing:.10em}
-  .venue{color:var(--dim);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase}
-  .badge{margin-left:auto;font-size:9.5px;letter-spacing:.18em;padding:3px 8px;
-         border-radius:4px;text-transform:uppercase}
-  .b-ok{background:#10321f;color:var(--green)}
-  .b-down{background:#3f1214;color:var(--red)}
-  .b-stale{background:#3a2c0d;color:var(--amber)}
-  .b-halt{background:#3a2c0d;color:var(--amber)}
-  .row{display:flex;gap:18px;font-variant-numeric:tabular-nums}
-  .cell .k{font-size:9.5px;letter-spacing:.18em;color:var(--dim);text-transform:uppercase}
-  .cell .v{font-size:16.5px;margin-top:1px}
-  .pos{border-top:1px solid var(--line);padding-top:8px;font-size:12.5px}
-  .pos table{width:100%;border-collapse:collapse}
-  .pos td{padding:2.5px 4px;color:var(--dim);font-variant-numeric:tabular-nums}
-  .pos td:first-child{color:var(--ink)}
-  .pos td:last-child{text-align:right}
-  .long{color:var(--green)} .short{color:var(--red)}
-  .up{color:var(--green)} .dn{color:var(--red)} .muted{color:var(--dim)}
-  .flat{color:var(--dim);font-size:12px;letter-spacing:.1em}
-  .err{color:var(--red);font-size:11.5px;word-break:break-all}
-  .age{color:var(--dim);font-size:10.5px}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);
+       font-size:13.5px;line-height:1.5;
+       background-image:radial-gradient(1100px 500px at 50% -220px,#1a1533 0%,transparent 70%)}
+  .wrap{max-width:1340px;margin:0 auto;padding:26px 22px 70px}
+
+  /* ── header ── */
+  header{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  .coin{width:34px;height:34px;border-radius:50%;flex:none;
+        background:radial-gradient(circle at 34% 30%,#f4dc9a 0%,#d9b45b 42%,#8a6b25 100%);
+        box-shadow:0 0 18px rgba(217,180,91,.35), inset 0 0 0 2px rgba(0,0,0,.25)}
+  .brand{font-family:var(--serif);font-variant:small-caps;letter-spacing:.30em;
+         font-size:23px;color:var(--gold);font-weight:700;white-space:nowrap}
+  .brand small{color:var(--faint);font-size:13px;letter-spacing:.34em;margin-left:10px}
+  .polled{margin-left:auto;color:var(--faint);font-size:11px;letter-spacing:.08em}
+
+  /* ── status banner ── */
+  .banner{border:1px solid var(--green-dim);color:var(--green);border-radius:8px;
+          padding:9px 16px;text-align:center;letter-spacing:.28em;font-size:11.5px;
+          text-transform:uppercase;background:rgba(29,92,60,.10);margin-bottom:20px}
+  .banner.bad{border-color:var(--red-dim);color:var(--red);background:rgba(92,29,36,.12)}
+
+  /* ── totals ── */
+  .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+          gap:12px;margin-bottom:26px}
+  .tot{background:linear-gradient(180deg,var(--panel2),var(--panel));
+       border:1px solid var(--line);border-radius:10px;padding:16px 18px 14px}
+  .tot .k{font-size:10px;letter-spacing:.26em;color:var(--dim);text-transform:uppercase}
+  .tot .v{font-size:26px;margin-top:5px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .tot .s{font-size:11px;color:var(--faint);margin-top:2px}
+
+  /* ── section head ── */
+  .sec{font-family:var(--serif);font-variant:small-caps;letter-spacing:.16em;
+       color:var(--gold);font-size:17px;margin:0 0 12px 2px}
+
+  /* ── book cards ── */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:16px}
+  .card{background:linear-gradient(180deg,var(--panel2) 0%,var(--panel) 26%);
+        border:1px solid var(--line);border-radius:12px;padding:16px 18px 13px;
+        display:flex;flex-direction:column;gap:12px;position:relative;overflow:hidden}
+  .card::before{content:'';position:absolute;inset:0 auto 0 0;width:3px;background:var(--green)}
+  .card.warn::before{background:var(--amber)} .card.down::before{background:var(--red)}
+  .card.down{border-color:#472028}
+
+  .chead{display:flex;align-items:center;gap:10px}
+  .cname{font-weight:700;letter-spacing:.06em;font-size:15px}
+  .chip{font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);
+        border:1px solid var(--line2);border-radius:99px;padding:2.5px 10px}
+  .badge{margin-left:auto;font-size:9.5px;letter-spacing:.22em;padding:3.5px 10px;
+         border-radius:5px;text-transform:uppercase;font-weight:700}
+  .b-ok{background:rgba(61,220,132,.12);color:var(--green);border:1px solid var(--green-dim)}
+  .b-down{background:rgba(255,107,107,.10);color:var(--red);border:1px solid var(--red-dim)}
+  .b-warn{background:rgba(251,191,36,.10);color:var(--amber);border:1px solid #574310}
+
+  .stats{display:grid;grid-template-columns:1.25fr 1fr 1fr .8fr;gap:10px;
+         font-variant-numeric:tabular-nums}
+  .cell .k{font-size:9px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase}
+  .cell .v{font-size:17.5px;margin-top:2px}
+
+  .slots{display:flex;gap:3px;margin-top:6px}
+  .slot{height:3.5px;flex:1;border-radius:2px;background:var(--line)}
+  .slot.on{background:var(--gold)}
+
+  .pos{border-top:1px solid var(--line);padding-top:4px}
+  .prow{display:flex;align-items:center;gap:10px;padding:5.5px 2px;
+        border-bottom:1px solid rgba(36,31,61,.55);font-variant-numeric:tabular-nums}
+  .prow:last-child{border-bottom:none}
+  .pcoin{font-weight:700;min-width:74px;letter-spacing:.04em}
+  .pill{font-size:9px;letter-spacing:.16em;padding:2px 8px;border-radius:4px;
+        text-transform:uppercase;font-weight:700}
+  .pill.long{background:rgba(61,220,132,.12);color:var(--green)}
+  .pill.short{background:rgba(255,107,107,.12);color:var(--red)}
+  .armed{font-size:9.5px;color:var(--gold);letter-spacing:.14em}
+  .pup{margin-left:auto;font-size:13.5px}
+  .flat{color:var(--faint);font-size:11.5px;letter-spacing:.22em;text-transform:uppercase;
+        padding:12px 0 8px;text-align:center}
+  .err{color:var(--red);font-size:11.5px;word-break:break-all;padding:6px 0}
+
+  .cfoot{display:flex;align-items:center;gap:7px;color:var(--faint);font-size:10.5px;
+         letter-spacing:.06em}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--green);
+       animation:pulse 2.4s ease-in-out infinite}
+  .card.down .dot,.card.warn .dot{background:var(--red);animation:none}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  .up{color:var(--green)} .dn{color:var(--red)} .muted{color:var(--faint)}
+  .gold{color:var(--gold2)}
+  footer{margin-top:34px;color:var(--faint);font-size:10.5px;text-align:center;
+         letter-spacing:.2em;text-transform:uppercase}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>SOOMARIO ELITE <small>FLEET</small></h1>
+    <div class="coin"></div>
+    <div class="brand">Soomario Elite<small>FLEET</small></div>
     <span class="polled" id="polled">—</span>
   </header>
-  <div class="banner" id="banner"></div>
+
+  <div class="banner" id="banner">CONNECTING…</div>
   <div class="totals" id="totals"></div>
+
+  <div class="sec">Books</div>
   <div class="grid" id="grid"></div>
+
+  <footer>one strategy · every venue · soomario elite</footer>
 </div>
+
 <script>
 const $=id=>document.getElementById(id);
 const fmt=(v,d=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const sgn=v=>v==null?'muted':(v>=0?'up':'dn');
-const sfmt=v=>v==null?'—':(v>=0?'+':'')+fmt(v);
+const sfmt=v=>v==null?'—':(v>=0?'+':'−')+fmt(Math.abs(v));
 const age=s=>s==null?'':s<90?`${Math.round(s)}s`:s<5400?`${Math.round(s/60)}m`:`${(s/3600).toFixed(1)}h`;
 
 function badge(b){
-  if(b.state==='down') return '<span class="badge b-down">down</span>';
-  if(b.state==='stale') return '<span class="badge b-stale">stale</span>';
-  if(b.state==='halted') return '<span class="badge b-halt">daily halt</span>';
-  if(b.state==='dd-halted') return '<span class="badge b-halt">dd halt</span>';
+  if(b.state==='down')      return '<span class="badge b-down">down</span>';
+  if(b.state==='stale')     return '<span class="badge b-warn">stale</span>';
+  if(b.state==='halted')    return '<span class="badge b-warn">daily halt</span>';
+  if(b.state==='dd-halted') return '<span class="badge b-warn">dd halt</span>';
   return '<span class="badge b-ok">live</span>';
 }
 
+function slots(open,max){
+  if(!max||max>16) return '';
+  let h='<div class="slots">';
+  for(let i=0;i<max;i++) h+=`<div class="slot${i<(open||0)?' on':''}"></div>`;
+  return h+'</div>';
+}
+
 function card(b){
-  const cls = b.state==='down'?'card down':(b.state==='ok'?'card':'card warn');
-  let pos='';
+  const cls='card'+(b.state==='down'?' down':(b.state==='ok'?'':' warn'));
+  let body;
   if(b.state==='down'){
-    pos=`<div class="err">${b.error||'unreachable'}</div>`;
+    body=`<div class="err">${b.error||'unreachable'}</div>`;
   }else if((b.positions||[]).length){
-    pos='<div class="pos"><table>'+b.positions.map(p=>
-      `<tr><td>${p.coin}</td><td class="${p.side}">${p.side}</td>`+
-      `<td>${p.trail_active?'trail armed':''}</td>`+
-      `<td class="${sgn(p.upnl)}">${sfmt(p.upnl)}</td></tr>`).join('')+'</table></div>';
+    body='<div class="pos">'+b.positions.map(p=>
+      `<div class="prow"><span class="pcoin">${p.coin}</span>`+
+      `<span class="pill ${p.side}">${p.side}</span>`+
+      `<span class="armed">${p.trail_active?'▲ trail armed':''}</span>`+
+      `<span class="pup ${sgn(p.upnl)}">${sfmt(p.upnl)}</span></div>`).join('')+'</div>';
   }else{
-    pos='<div class="pos flat">flat</div>';
+    body='<div class="pos"><div class="flat">flat — waiting for a signal</div></div>';
   }
+  const pct=b.total_pnl_pct!=null?` <span class="muted" style="font-size:11px">${sfmt(b.total_pnl_pct)}%</span>`:'';
   return `<div class="${cls}">
     <div class="chead"><span class="cname">${b.label}</span>
-      <span class="venue">${b.exchange||''}</span>${badge(b)}</div>
-    <div class="row">
-      <div class="cell"><div class="k">equity</div><div class="v">$${fmt(b.equity)}</div></div>
+      <span class="chip">${b.exchange||'—'}</span>${badge(b)}</div>
+    <div class="stats">
+      <div class="cell"><div class="k">equity</div><div class="v gold">$${fmt(b.equity)}</div></div>
       <div class="cell"><div class="k">day p&l</div><div class="v ${sgn(b.day_pnl)}">${sfmt(b.day_pnl)}</div></div>
-      <div class="cell"><div class="k">total</div><div class="v ${sgn(b.total_pnl)}">${sfmt(b.total_pnl)}</div></div>
-      <div class="cell"><div class="k">open</div><div class="v">${b.open==null?'—':b.open}${b.max_concurrent?'/'+b.max_concurrent:''}</div></div>
+      <div class="cell"><div class="k">total p&l</div><div class="v ${sgn(b.total_pnl)}">${sfmt(b.total_pnl)}${pct}</div></div>
+      <div class="cell"><div class="k">open</div><div class="v">${b.open==null?'—':b.open}<span class="muted" style="font-size:12px">${b.max_concurrent?' / '+b.max_concurrent:''}</span></div>
+        ${slots(b.open,b.max_concurrent)}</div>
     </div>
-    ${pos}
-    <div class="age">${b.ts_age_sec!=null?'heartbeat '+age(b.ts_age_sec)+' ago':''}</div>
+    ${body}
+    <div class="cfoot"><span class="dot"></span>
+      ${b.ts_age_sec!=null?'heartbeat '+age(b.ts_age_sec)+' ago':(b.state==='down'?'no heartbeat':'')}
+      ${b.closed_trades!=null?`<span style="margin-left:auto">${b.closed_trades} closed trades</span>`:''}
+    </div>
   </div>`;
 }
 
 async function refresh(){
   try{
     const d=await (await fetch('/api/fleet')).json();
-    const t=d.totals||{};
+    const t=d.totals||{}, books=(d.books||[]).slice()
+      .sort((a,b)=>(b.equity??-1)-(a.equity??-1));
     $('totals').innerHTML=`
-      <div class="tot"><div class="k">combined equity</div><div class="v">$${fmt(t.equity)}</div></div>
-      <div class="tot"><div class="k">day p&l</div><div class="v ${sgn(t.day_pnl)}">${sfmt(t.day_pnl)}</div></div>
-      <div class="tot"><div class="k">total p&l</div><div class="v ${sgn(t.total_pnl)}">${sfmt(t.total_pnl)}</div></div>
-      <div class="tot"><div class="k">open positions</div><div class="v">${t.open??'—'}</div></div>
-      <div class="tot"><div class="k">books live</div><div class="v">${t.books_ok??0}/${t.books_total??0}</div></div>`;
-    $('grid').innerHTML=(d.books||[]).map(card).join('');
+      <div class="tot"><div class="k">combined equity</div><div class="v gold">$${fmt(t.equity)}</div>
+        <div class="s">across ${t.books_total??0} books</div></div>
+      <div class="tot"><div class="k">day p&l</div><div class="v ${sgn(t.day_pnl)}">${sfmt(t.day_pnl)}</div>
+        <div class="s">UTC day, all books</div></div>
+      <div class="tot"><div class="k">total p&l</div><div class="v ${sgn(t.total_pnl)}">${sfmt(t.total_pnl)}</div>
+        <div class="s">since each inception</div></div>
+      <div class="tot"><div class="k">open positions</div><div class="v">${t.open??'—'}</div>
+        <div class="s">fleet-wide</div></div>
+      <div class="tot"><div class="k">books live</div>
+        <div class="v ${ (t.books_ok===t.books_total)?'up':'dn'}">${t.books_ok??0} / ${t.books_total??0}</div>
+        <div class="s">${(t.attention||[]).length?'attention needed':'all reporting'}</div></div>`;
+    $('grid').innerHTML=books.map(card).join('');
     const att=t.attention||[];
-    $('banner').className = att.length?'banner show':'banner';
-    if(att.length) $('banner').textContent='NEEDS ATTENTION: '+att.join('  ·  ');
-    $('polled').textContent = d.polled_at ? ('polled '+new Date(d.polled_at).toLocaleTimeString()) : 'first poll pending…';
+    const bn=$('banner');
+    if(att.length){ bn.className='banner bad'; bn.textContent='⚠ needs attention · '+att.join(' · '); }
+    else{ bn.className='banner'; bn.textContent='live — all books reporting'; }
+    $('polled').textContent=d.polled_at?('polled '+new Date(d.polled_at).toLocaleTimeString()):'first poll pending…';
   }catch(e){
-    $('banner').className='banner show';
-    $('banner').textContent='fleet API unreachable: '+e;
+    const bn=$('banner'); bn.className='banner bad'; bn.textContent='fleet api unreachable — '+e;
   }
 }
 refresh(); setInterval(refresh, 30000);
