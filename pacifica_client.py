@@ -30,7 +30,7 @@ Env (set on Railway; never in code):
                             default "0" (PRIVATE_KEY is the main account key)
   PACIFICA_EXPIRY_WINDOW    signature expiry window ms (default 5000)
   PACIFICA_SLIPPAGE_PCT     market-order slippage guard % (default 0.5)
-  PACIFICA_TRADES_PATH      trade-history path override (default /account/trades)
+  PACIFICA_TRADES_PATH      trade-history path override (default /trades/history)
 """
 import json
 import logging
@@ -120,7 +120,10 @@ class PacificaClient:
         self.is_agent = os.getenv("PACIFICA_AGENT", "0") == "1"
         self.expiry_window = int(os.getenv("PACIFICA_EXPIRY_WINDOW", "5000"))
         self.slippage_pct = os.getenv("PACIFICA_SLIPPAGE_PCT", "0.5")
-        self.trades_path = os.getenv("PACIFICA_TRADES_PATH", "/account/trades")
+        # Pacifica moved trade history from /account/trades (now 404) to
+        # /trades/history -- observed live 2026-08-17, same params and a
+        # compatible response shape (symbol/amount/price/fee/side/created_at).
+        self.trades_path = os.getenv("PACIFICA_TRADES_PATH", "/trades/history")
 
         self._keypair = None          # solders Keypair (signer)
         self._agent_pubkey = None     # agent pubkey when is_agent

@@ -75,7 +75,7 @@ class FakeSession:
             return FakeResp({"success": True, "data": self.positions})
         if url.endswith("/account"):
             return FakeResp({"success": True, "data": {"account_equity": "1000.0"}})
-        if url.endswith("/account/trades"):
+        if url.endswith("/trades/history"):   # moved from /account/trades (404 since ~Aug 2026)
             return FakeResp({"success": True, "data": [
                 {"symbol": "SOL", "side": "close_long", "price": "210.0",
                  "amount": "5.0", "fee": "0.1", "created_at": 111}]})
