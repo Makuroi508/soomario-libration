@@ -47,8 +47,16 @@ except Exception as e:
     raise
 
 
-DEFAULT_PACIFICA = "WLD,LINK,HYPE,KPEPE,SUI,SOL,NEAR,ADA,ENA,BCH,AVAX,ZEC,XMR,AAVE,FARTCOIN,PENGU"
-DEFAULT_BULK = "SOL,ZEC,SUI,FARTCOIN,BNB,ETH,DOGE"
+# Venues trade THE BOOK by default -- config.COINS, the same eleven-coin list
+# every other Elite deployment runs, with per-coin params and probation sizing.
+# The old hardcoded per-venue defaults predated the elite findings and quietly
+# resurrected verified-dead coins (AAVE, ADA, AVAX, BCH, ENA, NEAR, WLD, ZEC)
+# on Pacifica even when the COINS env was set correctly, because _venue_coins
+# never consulted it. A venue-specific env (PACIFICA_COINS / BULK_COINS) is
+# still honoured for deliberate divergence -- e.g. Bulk testnet experiments.
+# Coins a venue does not list are dropped at boot against live market_info.
+DEFAULT_PACIFICA = ",".join(config.COINS)
+DEFAULT_BULK = ",".join(config.COINS)
 
 _BOOKS = {}   # name -> VenueBook (shared with the Flask reader)
 
