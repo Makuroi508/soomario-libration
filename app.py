@@ -57,6 +57,9 @@ except Exception as e:
     raise
 
 
+_INCEPTION_WARNED = None
+
+
 def _challenge_snapshot(pm, db):
     """The three numbers that decide a prop challenge: progress to target, room
     to today's floor, room to the PERMANENT floor. Mirrors the venue's own header
@@ -82,9 +85,21 @@ def _challenge_snapshot(pm, db):
     # venue-declared initial balance is only a fallback.
     init = acct.get("inception") or getattr(c, "_initial_balance", None) or eq
     venue_init = getattr(c, "_initial_balance", None)
-    if venue_init and acct.get("inception") and abs(venue_init - acct["inception"]) > 0.01:
-        logger.warning(f"challenge: venue initial ${venue_init:.2f} disagrees with recorded "
-                       f"inception ${acct['inception']:.2f} — showing inception (guard's anchor)")
+    # Warn only when the two genuinely disagree, and only once per pair. A
+    # challenge's initial balance is a round number while inception drifts by
+    # fees and rounding, so an absolute $0.01 threshold fired on a $1.66 gap
+    # every single tick. What this is here to catch is a re-baselining (the
+    # Foxify case, where the anchor moved by hundreds), not accounting dust.
+    if venue_init and acct.get("inception"):
+        drift = abs(venue_init - acct["inception"])
+        if drift / venue_init > 0.005:
+            key = (round(venue_init, 2), round(acct["inception"], 2))
+            global _INCEPTION_WARNED
+            if _INCEPTION_WARNED != key:
+                _INCEPTION_WARNED = key
+                logger.warning(f"challenge: venue initial ${venue_init:.2f} disagrees with "
+                               f"recorded inception ${acct['inception']:.2f} by ${drift:.2f} "
+                               f"- showing inception (the guard's anchor)")
     day_base = acct.get("daily_baseline") or eq
     max_dd, dd_type = pm.dd_limit()
     # Foxify imposes NO daily loss rule -- max drawdown is the only thing that
