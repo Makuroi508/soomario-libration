@@ -101,6 +101,11 @@ class DB:
             # every night, and then re-flattened the positions it had just let
             # open. Separate flag, cleared only by a human.
             ("account", "max_dd_halt", "INTEGER DEFAULT 0"),
+            # Shadows used to differ only in trail width. stale_h lets one carry
+            # a whole exit RULE instead: close at market after N hours if the
+            # trail never armed. NULL = a plain trail-width shadow.
+            ("shadow_state", "stale_h", "REAL"),
+            ("shadow_trades", "stale_h", "REAL"),
         ]
         for table, col, typ in adds:
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -292,11 +297,12 @@ class DB:
         return [dict(r) for r in self._conn.execute("SELECT * FROM rsi_state").fetchall()]
 
     # ── shadow trail A/B (counterfactual; never trades) ────────
-    def open_shadow(self, coin, trail_pct, side, entry, qty, hard_stop, opened_at):
+    def open_shadow(self, coin, trail_pct, side, entry, qty, hard_stop, opened_at,
+                    stale_h=None):
         self._conn.execute(
-            "INSERT INTO shadow_state (coin, trail_pct, side, entry, qty, peak, active, hard_stop, opened_at) "
-            "VALUES (?,?,?,?,?,?,0,?,?)",
-            (coin.upper(), trail_pct, side, entry, qty, entry, hard_stop, opened_at),
+            "INSERT INTO shadow_state (coin, trail_pct, side, entry, qty, peak, active, "
+            "hard_stop, opened_at, stale_h) VALUES (?,?,?,?,?,?,0,?,?,?)",
+            (coin.upper(), trail_pct, side, entry, qty, entry, hard_stop, opened_at, stale_h),
         )
         self._conn.commit()
 
@@ -322,10 +328,11 @@ class DB:
             return
         self._conn.execute(
             "INSERT INTO shadow_trades (coin, side, trail_pct, entry, shadow_exit, "
-            "shadow_ret_pct, shadow_net_pct, exit_reason, opened_at, shadow_closed_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "shadow_ret_pct, shadow_net_pct, exit_reason, opened_at, shadow_closed_at, "
+            "stale_h) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (row["coin"], row["side"], row["trail_pct"], row["entry"], shadow_exit,
-             round(ret_pct, 4), round(net_pct, 4), reason, opened_at, iso()),
+             round(ret_pct, 4), round(net_pct, 4), reason, opened_at, iso(),
+             row["stale_h"] if "stale_h" in row.keys() else None),
         )
         self._conn.execute("DELETE FROM shadow_state WHERE id=?", (sid,))
         self._conn.commit()
@@ -339,11 +346,27 @@ class DB:
                 return None
             return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
         out = {}
-        for tp, in self._conn.execute("SELECT DISTINCT trail_pct FROM shadow_trades").fetchall():
-            nets = [r[0] for r in self._conn.execute(
-                "SELECT shadow_net_pct FROM shadow_trades WHERE trail_pct=?", (tp,)).fetchall()]
-            out[tp] = {"n": len(nets), "median_net_pct": _median(nets),
-                       "win_rate": round(sum(1 for x in nets if x > 0) / len(nets) * 100, 2) if nets else None}
+        # Group by the whole rule (width + stale hours), not width alone, or a
+        # stale-exit shadow would be silently averaged into the plain trail it
+        # is being compared against.
+        rows = self._conn.execute(
+            "SELECT DISTINCT trail_pct, stale_h FROM shadow_trades").fetchall()
+        for tp, sh in rows:
+            if sh is None:
+                nets = [r[0] for r in self._conn.execute(
+                    "SELECT shadow_net_pct FROM shadow_trades "
+                    "WHERE trail_pct=? AND stale_h IS NULL", (tp,)).fetchall()]
+                key = tp
+            else:
+                nets = [r[0] for r in self._conn.execute(
+                    "SELECT shadow_net_pct FROM shadow_trades "
+                    "WHERE trail_pct=? AND stale_h=?", (tp, sh)).fetchall()]
+                key = f"{tp}+stale{sh:g}h"
+            if not nets:
+                continue
+            out[key] = {"n": len(nets), "median_net_pct": _median(nets),
+                        "trail_pct": tp, "stale_h": sh,
+                        "win_rate": round(sum(1 for x in nets if x > 0) / len(nets) * 100, 2)}
         return out
 
     def snapshot_equity(self, equity: float, extra: Optional[dict] = None):

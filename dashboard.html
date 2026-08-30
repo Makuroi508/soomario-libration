@@ -933,7 +933,7 @@ async function loadShadow(){
   }
 
   // rows: live first, then shadows; highlight the best median net
-  const rows = [{trail_pct:live.trail_pct, type:'LIVE', ...live},
+  const rows = [{trail_pct:live.trail_pct, label:live.trail_pct+'%', type:'LIVE', ...live},
                 ...shadows.map(s=>({...s, type:'shadow'}))];
   const meds = rows.map(r=>r.median_net_pct).filter(v=>v!=null);
   const best = meds.length ? Math.max(...meds) : null;
@@ -946,7 +946,7 @@ async function loadShadow(){
       const medCls = (r.median_net_pct||0)>=0?'up':'down';
       const typeTag = r.type==='LIVE' ? '<span class="tag trail">LIVE</span>' : '<span class="tag dim">shadow</span>';
       return `<tr style="${isBest?'background:rgba(212,168,67,0.07)':''}">
-        <td><b>${r.trail_pct!=null?r.trail_pct+'%':'—'}</b>${isBest?' <span class="tag" style="background:rgba(212,168,67,0.15);color:var(--gold)">best</span>':''}</td>
+        <td><b>${r.label ? r.label : (r.trail_pct!=null?r.trail_pct+'%':'—')}</b>${isBest?' <span class="tag" style="background:rgba(212,168,67,0.15);color:var(--gold)">best</span>':''}</td>
         <td>${typeTag}</td>
         <td>${r.n||0}</td>
         <td class="${medCls}">${r.median_net_pct!=null?fmtPct(r.median_net_pct):'—'}</td>
@@ -964,7 +964,7 @@ async function loadShadow(){
     const liveMed = live.median_net_pct;
     const bestShadow = shadows.reduce((a,b)=>(b.median_net_pct||-1e9)>(a.median_net_pct||-1e9)?b:a, {median_net_pct:-1e9});
     if(bestShadow.median_net_pct > (liveMed||0) + 0.05){
-      v.innerHTML = `Shadow ${bestShadow.trail_pct}% leads live ${live.trail_pct}% by ${fmtPct(bestShadow.median_net_pct-liveMed)} after friction — consider switching.`;
+      v.innerHTML = `Shadow ${bestShadow.label || bestShadow.trail_pct+'%'} leads live ${live.trail_pct}% by ${fmtPct(bestShadow.median_net_pct-liveMed)} after friction — consider switching.`;
       v.style.color = 'var(--gold)';
     } else {
       v.innerHTML = `Live ${live.trail_pct}% holds — no shadow beats it by a clear margin after friction.`;

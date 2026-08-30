@@ -225,10 +225,17 @@ def api_shadow():
         "win_rate": round(sum(1 for x in live_nets if x > 0) / len(live_nets) * 100, 2) if live_nets else None,
     }
     shadows = []
-    for tp, s in sorted(db.shadow_summary().items()):
-        shadows.append({"trail_pct": tp, "n": s["n"],
-                        "median_net_pct": round(s["median_net_pct"], 4) if s["median_net_pct"] is not None else None,
-                        "win_rate": s["win_rate"]})
+    # Keys are floats for plain trail-width shadows and strings for rule
+    # shadows ("0.55+stale24h"), so sort on the string form - sorting the mixed
+    # set directly raises TypeError.
+    for key, sm in sorted(db.shadow_summary().items(), key=lambda kv: str(kv[0])):
+        shadows.append({"label": str(key),
+                        "trail_pct": sm.get("trail_pct", key),
+                        "stale_h": sm.get("stale_h"),
+                        "n": sm["n"],
+                        "median_net_pct": round(sm["median_net_pct"], 4)
+                        if sm["median_net_pct"] is not None else None,
+                        "win_rate": sm["win_rate"]})
     fric_avg, fric_n = db.measured_friction()
     is_meas = fric_avg is not None and fric_n >= 5
     return jsonify({

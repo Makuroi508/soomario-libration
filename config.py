@@ -93,6 +93,11 @@ PAPER_SLIPPAGE_PCT = _f("PAPER_SLIPPAGE_PCT", 0.0)  # adverse fill padding for r
 # Live trades TRAIL_PCT; shadow tracks what these tighter trails WOULD have done
 # on the same entries/prices. Decide the trail from live data, not the backtest.
 SHADOW_TRAILS = [float(x) for x in os.getenv("SHADOW_TRAILS", "0.3,0.4").split(",") if x.strip()]
+# Exit-RULE shadows: run the LIVE trail plus a stale exit at N hours (close at
+# market if the trail never armed). Off by default. See shadow.py for why this
+# is shadowed rather than shipped - backtest says it loses, but a 0.55% trail
+# cannot be backtested honestly on candles, so live fills are the arbiter.
+SHADOW_STALE_HOURS = [float(x) for x in os.getenv("SHADOW_STALE_HOURS", "").split(",") if x.strip()]
 # Round-trip friction charged to shadow exits so they're a FAIR comparison.
 # Placeholder = backtest assumption; update from the live realized-friction KPI
 # (or wire userFills) once Phase 1 produces real numbers. Spec §7b.
