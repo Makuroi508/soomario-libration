@@ -26,7 +26,13 @@ def _b(name, default="0"):
 
 
 # ─── Paths / state ──────────────────────────────────────────────
-NAME = "Soomario Elite"
+# The book's display name, surfaced on /api/status, /healthz and the dashboard.
+# Env-driven because one repo runs several deployments: the multi-coin vault and
+# a single-asset HYPE book are the same engine with a different COINS list.
+# Hardcoding it meant every instance announced itself as "Soomario Elite", so the
+# multi-coin vault reported a different product's name and any second deployment
+# would have inherited it too.
+NAME = os.getenv("BOOK_NAME", "Soomario Libration")
 
 BASE_DIR  = Path(__file__).parent
 STATE_DIR = Path(os.getenv("STATE_PATH", str(BASE_DIR / "state")))
