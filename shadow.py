@@ -18,8 +18,24 @@ almost always close BEFORE the real 0.55% position; reap() cleans up the rare
 leftover when a real position closes first (e.g. a gap straight to the hard
 stop). This compares EXIT RULES on identical entries — the right first-order
 question — not a full divergent-path re-backtest.
+
+STALE-EXIT SHADOWS (SHADOW_STALE_HOURS)
+A shadow may also carry a whole exit RULE rather than just a narrower trail:
+close at market after N hours if the trail never armed. That rule exists because
+losing trades are a distinct population — measured over 2,018 trades at 1-minute
+resolution across crypto and equity perps, NOT ONE hard stop had ever reached
++0.55%, and they sat underwater for a median 66-71 hours against 2-4 hours for a
+winner. They do not go wrong; they go nowhere, slowly.
+
+The catch, and the reason this is shadowed rather than shipped: 75-80% of the
+trades still unarmed at 24 hours went on to WIN. Cutting them kills roughly three
+winners per hard stop avoided, and in backtest every stale variant lost to the
+plain trail on gross return, before friction. Candle backtests of a 0.55% trail
+are unreliable by construction, though, which is exactly what a shadow settles —
+so the rule runs here, against real fills, at no risk.
 """
 import logging
+from datetime import datetime, timezone
 
 import config
 from utils import iso
@@ -29,18 +45,28 @@ EPS = 1e-9
 
 
 class ShadowTracker:
-    def __init__(self, db, trails=None, friction_fn=None):
+    def __init__(self, db, trails=None, friction_fn=None, stale_hours=None):
         self.db = db
         self.trails = trails if trails is not None else config.SHADOW_TRAILS
+        # Exit-RULE shadows: the live trail width plus a stale exit at N hours.
+        self.stale_hours = (stale_hours if stale_hours is not None
+                            else getattr(config, "SHADOW_STALE_HOURS", []))
         # measured real round-trip friction (%). Placeholder until live fills
         # populate it; override by passing a callable that reads the KPI.
         self.friction_fn = friction_fn or (lambda: config.MEASURED_FRICTION_PCT)
 
     def on_open(self, pos: dict):
-        """Seed one shadow per trail value off the real entry + hard stop."""
+        """Seed one shadow per trail value, plus one per stale-exit rule."""
+        opened = pos.get("opened_at") or iso()
         for tp in self.trails:
             self.db.open_shadow(pos["coin"], tp, pos["side"], pos["entry"],
-                                pos["qty"], pos["hard_stop"], pos.get("opened_at") or iso())
+                                pos["qty"], pos["hard_stop"], opened)
+        for h in self.stale_hours:
+            # Same trail the bot actually runs, so the ONLY difference from the
+            # live position is the stale exit. Anything else confounds the test.
+            self.db.open_shadow(pos["coin"], config.TRAIL_PCT, pos["side"],
+                                pos["entry"], pos["qty"], pos["hard_stop"],
+                                opened, stale_h=h)
 
     def on_price(self, coin: str, price: float):
         """Advance every open shadow for `coin` and book any that would trigger."""
@@ -59,6 +85,16 @@ class ShadowTracker:
                 self._book(s, px, "ORPHAN")
 
     # ── internals ──────────────────────────────────────────────
+    def _hours_open(self, s):
+        """Hours since the shadow's entry, or None if the timestamp is unusable."""
+        try:
+            t0 = datetime.fromisoformat(str(s["opened_at"]).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        if t0.tzinfo is None:
+            t0 = t0.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - t0).total_seconds() / 3600
+
     def _step(self, s, price):
         is_long = s["side"] == "long"
         peak = max(s["peak"], price) if is_long else min(s["peak"], price)
@@ -84,7 +120,17 @@ class ShadowTracker:
                 (is_long and eff > s["hard_stop"] + EPS) or
                 (not is_long and eff < s["hard_stop"] - EPS)) else "HARD_STOP"
             self._book(s, eff, reason)
-        elif peak != s["peak"] or active != bool(s["active"]):
+            return
+
+        # Stale exit: only for rule shadows, only while the trail never armed.
+        # Booked at the live mark, because that is what a market close gets.
+        stale_h = s["stale_h"] if "stale_h" in s.keys() else None
+        if stale_h and not active:
+            age = self._hours_open(s)
+            if age is not None and age >= stale_h:
+                self._book(s, price, "STALE")
+                return
+        if peak != s["peak"] or active != bool(s["active"]):
             self.db.update_shadow(s["id"], peak=peak, active=active)
 
     def _book(self, s, exit_px, reason):
@@ -93,5 +139,7 @@ class ShadowTracker:
         ret_pct = move / s["entry"] * 100 if s["entry"] else 0.0
         net_pct = ret_pct - self.friction_fn()   # fair-comparison: charge measured friction
         self.db.close_shadow(s["id"], round(exit_px, 8), ret_pct, net_pct, reason, s["opened_at"])
-        logger.info(f"    ◌ shadow {s['coin']} @{s['trail_pct']}% {reason} "
+        sh = s["stale_h"] if "stale_h" in s.keys() else None
+        tag = f"@{s['trail_pct']}%" + (f"+stale{sh:g}h" if sh else "")
+        logger.info(f"    ◌ shadow {s['coin']} {tag} {reason} "
                     f"ret {ret_pct:+.2f}% net {net_pct:+.2f}% (friction {self.friction_fn():.2f}%)")

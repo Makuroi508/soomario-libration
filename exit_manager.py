@@ -17,7 +17,7 @@ PAPER: there is no exchange, so manage() also detects a stop crossing and books
 the close itself, idealized at the stop level.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import config
 from utils import iso, append_jsonl, tg_notify
@@ -70,6 +70,26 @@ class ExitManager:
             else:
                 logger.error(f"❌ {coin}: still UNPROTECTED — stop placement rejected again")
 
+        # ── Pine-parity arming delay ────────────────────────────
+        # The TV strategies this mirrors cannot arm on the entry bar, and the
+        # elite A/B showed immediate arming losing 12/12 on real data (see
+        # config.TRAIL_ARM_DELAY_BARS). Until the delay passes: no peak
+        # tracking, no arming, no trail moves. Peak is RESET to the current
+        # price so the trail starts from where the market is when it goes
+        # live, not from an extreme printed while it did not exist. The hard
+        # stop above and the stop backstops below stay fully active.
+        if self._in_arm_delay(pos):
+            if pos["peak"] != price:
+                updates["peak"] = price
+            if updates:                    # may also carry hard_stop_id from above
+                pos = {**pos, **updates}
+                self.db.update_position(coin, **updates)
+            if config.PAPER:
+                self._paper_check_stop(pos, price)
+            else:
+                self._live_stop_backstop(pos, price)
+            return
+
         # Track the favorable extreme: max price for long, min price for short.
         if is_long:
             peak = max(pos["peak"], price)
@@ -80,8 +100,9 @@ class ExitManager:
 
         trail_active = bool(pos["trail_active"])
         if config.TRAIL_ENABLED and not trail_active:
-            armed = price >= entry * (1 + config.TRAIL_PCT / 100) if is_long \
-                else price <= entry * (1 - config.TRAIL_PCT / 100)
+            tp = config.trail_pct(coin)
+            armed = price >= entry * (1 + tp / 100) if is_long \
+                else price <= entry * (1 - tp / 100)
             if armed:
                 trail_active = True
                 updates["trail_active"] = 1
@@ -89,7 +110,7 @@ class ExitManager:
 
         # Once armed, compute the trail level and ratchet the resting stop.
         if trail_active:
-            band = entry * (config.TRAIL_PCT / 100)
+            band = entry * (config.trail_pct(coin) / 100)
             if is_long:
                 trail = peak - band
                 new_stop = max(trail, pos["hard_stop"])
@@ -116,6 +137,28 @@ class ExitManager:
             self._paper_check_stop(pos, price)
         else:
             self._live_stop_backstop(pos, price)
+
+    def _in_arm_delay(self, pos) -> bool:
+        """True while the position is younger than its coin's arming delay.
+
+        Fails OPEN (no delay) on a missing or unparseable opened_at: for an
+        adopted orphan with no timestamp, managing the trail immediately is the
+        pre-existing behaviour and strictly safer than never arming at all.
+        """
+        delay = config.arm_delay_sec(pos.get("coin"))
+        if delay <= 0:
+            return False
+        raw = pos.get("opened_at")
+        if not raw:
+            return False
+        try:
+            opened = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        age = (datetime.now(timezone.utc) - opened).total_seconds()
+        return age < delay
 
     def _live_stop_backstop(self, pos, price):
         """LIVE safety net: never let a position survive past its stop just
@@ -310,8 +353,9 @@ class ExitManager:
                               f"{qty} @ ${entry:.6f} is live on the exchange but the bot is not "
                               f"tracking it. Nothing is managing its risk.", level="warn")
                 continue
-            stop_px = entry * (1 - config.HARD_STOP_PCT / 100) if is_long \
-                else entry * (1 + config.HARD_STOP_PCT / 100)
+            _hs = config.hard_stop_pct(coin)
+            stop_px = entry * (1 - _hs / 100) if is_long \
+                else entry * (1 + _hs / 100)
             self.db.insert_position(dict(
                 coin=coin, side="long" if is_long else "short", entry=entry, qty=qty,
                 notional=qty * entry, margin=qty * entry / max(config.LEVERAGE, 1),

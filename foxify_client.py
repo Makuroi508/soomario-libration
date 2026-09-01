@@ -194,9 +194,17 @@ class FoxifyClient:
         if bal is None:
             logger.error("Foxify: /signals/balance did not answer — refusing to start")
             return False
-        self._initial_balance = _f(bal.get("currentBalance"))
+        # NOT the challenge's starting balance. /signals/balance returns only
+        # currentBalance / availableBalance / openInterest — currentBalance is
+        # LIVE equity. Assigning it to _initial_balance made the challenge
+        # anchor re-baseline to whatever the account was worth at boot, so every
+        # redeploy reset "drawdown used" to ~0 and walked the displayed breach
+        # level DOWN with it. Leave it None; the durable starting balance is
+        # account.inception, captured once and persisted, which is also what
+        # check_max_dd anchors a static drawdown to.
+        self._initial_balance = None
         logger.info(
-            f"✅ Foxify signal {self.signal_id} | balance ${self._initial_balance:.2f} "
+            f"✅ Foxify signal {self.signal_id} | equity ${_f(bal.get('currentBalance')):.2f} "
             f"| available ${_f(bal.get('availableBalance')):.2f} "
             f"| open interest ${_f(bal.get('openInterest')):.2f}"
         )

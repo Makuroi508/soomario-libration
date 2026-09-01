@@ -1,5 +1,5 @@
 """
-Soomario Libration — Entry point
+Soomario Elite — Entry point
 ═════════════════════════════════
 Flask dashboard on the main thread; a daemon worker that ticks every
 POLL_SECONDS. Same failure posture as Aphelion:
@@ -21,7 +21,7 @@ import sys
 import traceback
 
 print("=" * 60, flush=True)
-print("LIBRATION — BOOT TRACE", flush=True)
+print("SOOMARIO ELITE — BOOT TRACE", flush=True)
 print(f"  python: {sys.version}", flush=True)
 print("=" * 60, flush=True)
 
@@ -31,7 +31,7 @@ try:
     import time
     from datetime import datetime, timezone
 
-    from utils import setup_logging, iso, save_json, tg_notify
+    from utils import setup_logging, iso, save_json, tg_notify, next_utc_reset
     setup_logging()
     logger = logging.getLogger("app")
     print("[boot] utils + logging OK", flush=True)
@@ -57,6 +57,9 @@ except Exception as e:
     raise
 
 
+_INCEPTION_WARNED = None
+
+
 def _challenge_snapshot(pm, db):
     """The three numbers that decide a prop challenge: progress to target, room
     to today's floor, room to the PERMANENT floor. Mirrors the venue's own header
@@ -75,7 +78,28 @@ def _challenge_snapshot(pm, db):
     if not eq or eq <= 0:
         return None
     acct = db.account()
-    init = getattr(c, "_initial_balance", None) or acct.get("inception") or eq
+    # Anchor from the SAME source the guard uses. check_max_dd() reads
+    # account.inception for a static drawdown, so the panel must too — a
+    # display anchored somewhere else tells you that you have room the guard
+    # does not agree you have. inception is captured once and persisted; a
+    # venue-declared initial balance is only a fallback.
+    init = acct.get("inception") or getattr(c, "_initial_balance", None) or eq
+    venue_init = getattr(c, "_initial_balance", None)
+    # Warn only when the two genuinely disagree, and only once per pair. A
+    # challenge's initial balance is a round number while inception drifts by
+    # fees and rounding, so an absolute $0.01 threshold fired on a $1.66 gap
+    # every single tick. What this is here to catch is a re-baselining (the
+    # Foxify case, where the anchor moved by hundreds), not accounting dust.
+    if venue_init and acct.get("inception"):
+        drift = abs(venue_init - acct["inception"])
+        if drift / venue_init > 0.005:
+            key = (round(venue_init, 2), round(acct["inception"], 2))
+            global _INCEPTION_WARNED
+            if _INCEPTION_WARNED != key:
+                _INCEPTION_WARNED = key
+                logger.warning(f"challenge: venue initial ${venue_init:.2f} disagrees with "
+                               f"recorded inception ${acct['inception']:.2f} by ${drift:.2f} "
+                               f"- showing inception (the guard's anchor)")
     day_base = acct.get("daily_baseline") or eq
     max_dd, dd_type = pm.dd_limit()
     # Foxify imposes NO daily loss rule -- max drawdown is the only thing that
@@ -107,6 +131,11 @@ def _challenge_snapshot(pm, db):
         "daily_allowed": round(daily_allow, 2),
         "daily_limit_pct": v_daily,
         "daily_guard_pct": round(pm.daily_limit_pct(), 2),
+        # The card claimed "guard flattens at -X%" unconditionally, but the
+        # halt only closes the book when DAILY_FLATTEN=1 (default 0). Publish
+        # the real behaviour so the dashboard stops describing an action the
+        # bot will not take.
+        "daily_flatten": bool(config.DAILY_FLATTEN),
         "daily_floor": round(day_base * (1 - v_daily / 100), 2),
         "dd_used_pct": round(dd_used_pct, 3),
         "dd_limit_pct": max_dd,
@@ -163,7 +192,12 @@ def _write_status(db, pm, equity, total_upnl, marks):
         "open_positions": len(positions),
         "max_concurrent": pm.max_concurrent,
         "daily_halt": bool(acct["daily_halt"]),
+        "max_dd_halt": bool(acct.get("max_dd_halt")),
         "daily_baseline": acct["daily_baseline"],
+        # When the halt lifts. Always published (not only while halted) so the
+        # dashboard can show "resumes in ..." without guessing the boundary.
+        "daily_reset_at": next_utc_reset().isoformat(),
+        "last_reset": acct.get("last_reset"),
         "positions": positions,
         "challenge": _challenge_snapshot(pm, db),
     })
@@ -272,7 +306,7 @@ def _rebuild_logs_from_ledger(db):
 def run_worker():
     time.sleep(3)  # let Flask bind first
     logger.info("═" * 60)
-    logger.info(f"  LIBRATION WORKER STARTING — {config_summary()}")
+    logger.info(f"  ELITE WORKER STARTING — {config_summary()}")
     logger.info("═" * 60)
 
     if config.EXCHANGE == "propr":
@@ -313,6 +347,15 @@ def run_worker():
     # read made live positions look closed). Gated by env REPAIR_PHANTOM_CLOSES=1;
     # only deletes a "closed" trade when that coin is STILL OPEN on the exchange,
     # which proves the close was fabricated. Remove the env var after one run.
+    # The max-drawdown halt is deliberately permanent — it is the limit that
+    # ends a challenge, so nothing clears it automatically. This is the
+    # documented way back in after a human has reviewed. Remove the env var
+    # after one boot or it clears the halt on every restart.
+    if os.getenv("CLEAR_MAX_DD_HALT") == "1":
+        db.set_account(max_dd_halt=0, daily_halt=0)
+        logger.warning("⚠️  CLEAR_MAX_DD_HALT=1 — max-drawdown halt cleared. "
+                       "REMOVE this env var now.")
+        tg_notify("⚠️ Max-drawdown halt manually cleared. Trading may resume.", level="warn")
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
     if os.getenv("REBUILD_CURVE") == "1":
@@ -460,7 +503,8 @@ def tick(hl, db, pm, em, shadow):
                 continue
             if not signals.new_closed_bar(seen, last_ts):
                 continue  # already evaluated this bar — no double-fire
-            sig = signals.entry_signal(rsi[-2], rsi[-1], config.LONG_LEVEL, config.SHORT_LEVEL)
+            sig = signals.entry_signal(rsi[-2], rsi[-1],
+                                       config.long_level(coin), config.short_level(coin))
             if sig:
                 price = marks.get(coin) or closes[-1]
                 pos = pm.maybe_enter(coin, sig, price)
@@ -501,7 +545,7 @@ def tick(hl, db, pm, em, shadow):
 
 def main():
     logger.info("═" * 60)
-    logger.info(f"  LIBRATION launching — ts={iso()}")
+    logger.info(f"  ELITE launching — ts={iso()}")
     logger.info("═" * 60)
     t = threading.Thread(target=run_worker, daemon=True, name="libration-worker")
     t.start()

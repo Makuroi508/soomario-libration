@@ -241,7 +241,7 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
   <div class="sn-brand">
     <div class="sn-brand-mark"></div>
     <div class="sn-brand-text">
-      <span class="sn-brand-name">LIBRATION</span>
+      <span class="sn-brand-name">ELITE</span>
       <span class="sn-brand-sub">Soomario · RSI Swing</span>
     </div>
   </div>
@@ -545,6 +545,25 @@ async function api(path){
 const fmt$ = v => (v==null||isNaN(v)) ? '—' : '$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtPct = v => (v==null||isNaN(v)) ? '—' : (v>=0?'+':'')+Number(v).toFixed(2)+'%';
 
+// ── daily-halt countdown ──────────────────────────────────────
+// The halt lifts when the UTC date rolls over (maybe_reset_daily clears
+// daily_halt on the first tick after 00:00 UTC). Ticks once a second off the
+// stored target, so it stays live between status polls.
+function renderHaltSub(){
+  const h = window.__halt, el = document.getElementById('sDDSub');
+  if(!h || !el) return;
+  if(!h.on){ el.textContent = 'halt at -'+h.lim+'% / UTC day'; return; }
+  if(!h.at){ el.textContent = 'HALTED — resumes at 00:00 UTC'; return; }
+  const ms = new Date(h.at) - new Date();
+  if(ms <= 0){ el.textContent = 'HALTED — resuming on the next tick'; return; }
+  const t = Math.floor(ms/1000);
+  const hh = Math.floor(t/3600), mm = Math.floor((t%3600)/60), ss = t%60;
+  const local = new Date(h.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  el.textContent = 'HALTED — resumes in '
+    + (hh?hh+'h ':'') + mm + 'm ' + String(ss).padStart(2,'0') + 's · ' + local + ' local';
+}
+setInterval(renderHaltSub, 1000);
+
 /* ── tabs ── */
 function showTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on', t.id==='tab-'+name));
@@ -590,9 +609,23 @@ async function loadStatus(){
   const sDD=document.getElementById('sDD'); sDD.textContent=fmtPct(dPct);
   sDD.className='scard-v '+(dPct>=0?'up':'down');
   const scDD=document.getElementById('scDD');
-  if(s.daily_halt){ scDD.className='scard warn'; document.getElementById('sDDSub').textContent='HALTED — no new entries until UTC rollover'; }
-  else { scDD.className='scard'; document.getElementById('sDDSub').textContent=
-      'halt at -'+(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')+'% / UTC day'; }
+  scDD.className = (s.daily_halt || s.max_dd_halt) ? 'scard warn' : 'scard';
+  // The max-DD halt outranks the daily one: it does not lift at midnight, so a
+  // countdown would be a lie. Say what it actually takes to resume.
+  if(s.max_dd_halt){
+    // Outranks the daily halt: it does not lift at midnight, so a countdown
+    // would be a lie. Say what it actually takes to resume.
+    window.__halt = null;
+    document.getElementById('sDDSub').textContent =
+      'MAX DRAWDOWN HALT — permanent · clear with CLEAR_MAX_DD_HALT=1';
+  } else {
+    // Keep the halt state where the 1s ticker can see it. "until UTC rollover"
+    // is accurate but useless when you want to know whether that is in ten
+    // minutes or ten hours — so render an actual countdown plus a local time.
+    window.__halt = {on:!!s.daily_halt, at:s.daily_reset_at||null,
+      lim:(s.config&&s.config.daily_dd_pct!=null?s.config.daily_dd_pct:'?')};
+    renderHaltSub();
+  }
   const maxc=s.max_concurrent||10, opn=s.open_positions||0;
   document.getElementById('sConc').textContent=opn+' / '+maxc;
   document.getElementById('hGauge').innerHTML=Array.from({length:maxc},(_,i)=>`<i class="${i<opn?'f':''}"></i>`).join('');
@@ -623,7 +656,7 @@ function renderChallenge(c){
   const du=c.daily_used||0, da=c.daily_allowed||0, dpc=da?du/da*100:0;
   set('chalDaily','chalDailyBar','chalDailySub', dpc,
       '$'+du.toFixed(2)+' / $'+da.toFixed(2),
-      'guard flattens at -'+c.daily_guard_pct+'% · '+
+      (c.daily_flatten ? 'guard flattens at -' : 'guard halts entries at -')+c.daily_guard_pct+'% · '+
       (c.daily_is_venue ? ('venue limit '+c.daily_limit_pct+'%')
                         : ('self-imposed '+c.daily_limit_pct+'% · no venue daily rule')));
   document.getElementById('scDaily').className='scard'+(dpc>=60?' warn':'');
@@ -951,7 +984,7 @@ async function loadShadow(){
   }
 
   // rows: live first, then shadows; highlight the best median net
-  const rows = [{trail_pct:live.trail_pct, type:'LIVE', ...live},
+  const rows = [{trail_pct:live.trail_pct, label:live.trail_pct+'%', type:'LIVE', ...live},
                 ...shadows.map(s=>({...s, type:'shadow'}))];
   const meds = rows.map(r=>r.median_net_pct).filter(v=>v!=null);
   const best = meds.length ? Math.max(...meds) : null;
@@ -964,7 +997,7 @@ async function loadShadow(){
       const medCls = (r.median_net_pct||0)>=0?'up':'down';
       const typeTag = r.type==='LIVE' ? '<span class="tag trail">LIVE</span>' : '<span class="tag dim">shadow</span>';
       return `<tr style="${isBest?'background:rgba(212,168,67,0.07)':''}">
-        <td><b>${r.trail_pct!=null?r.trail_pct+'%':'—'}</b>${isBest?' <span class="tag" style="background:rgba(212,168,67,0.15);color:var(--gold)">best</span>':''}</td>
+        <td><b>${r.label ? r.label : (r.trail_pct!=null?r.trail_pct+'%':'—')}</b>${isBest?' <span class="tag" style="background:rgba(212,168,67,0.15);color:var(--gold)">best</span>':''}</td>
         <td>${typeTag}</td>
         <td>${r.n||0}</td>
         <td class="${medCls}">${r.median_net_pct!=null?fmtPct(r.median_net_pct):'—'}</td>
@@ -982,7 +1015,7 @@ async function loadShadow(){
     const liveMed = live.median_net_pct;
     const bestShadow = shadows.reduce((a,b)=>(b.median_net_pct||-1e9)>(a.median_net_pct||-1e9)?b:a, {median_net_pct:-1e9});
     if(bestShadow.median_net_pct > (liveMed||0) + 0.05){
-      v.innerHTML = `Shadow ${bestShadow.trail_pct}% leads live ${live.trail_pct}% by ${fmtPct(bestShadow.median_net_pct-liveMed)} after friction — consider switching.`;
+      v.innerHTML = `Shadow ${bestShadow.label || bestShadow.trail_pct+'%'} leads live ${live.trail_pct}% by ${fmtPct(bestShadow.median_net_pct-liveMed)} after friction — consider switching.`;
       v.style.color = 'var(--gold)';
     } else {
       v.innerHTML = `Live ${live.trail_pct}% holds — no shadow beats it by a clear margin after friction.`;

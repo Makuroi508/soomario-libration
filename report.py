@@ -641,11 +641,23 @@ def _shadow_section(db, days):
         return {"label": "Trail A/B", "rows": [], "note": "shadow data unavailable"}
 
     charged = config.MEASURED_FRICTION_PCT
-    rows = [{"trail_pct": tp, "n": s["n"],
-             "median_net_pct": round(s["median_net_pct"], 4)
-             if s.get("median_net_pct") is not None else None,
-             "win_rate": s.get("win_rate")}
-            for tp, s in sorted(summary.items())]
+    # shadow_summary() keys are mixed types: a float for a plain trail, a string
+    # like "0.4+stale12h" once a rule carries a stale-exit. sorted() over the raw
+    # keys raises TypeError, so order by the structured fields in the value.
+    rows = []
+    for key, v in summary.items():
+        tp = v.get("trail_pct", key)
+        sh = v.get("stale_h")
+        rows.append({"rule": str(key),
+                     "trail_pct": tp,
+                     "stale_h": sh,
+                     "label": "{}%{}".format(
+                         tp, " + stale {:g}h".format(sh) if sh else ""),
+                     "n": v["n"],
+                     "median_net_pct": round(v["median_net_pct"], 4)
+                     if v.get("median_net_pct") is not None else None,
+                     "win_rate": v.get("win_rate")})
+    rows.sort(key=lambda r: (float(r["trail_pct"] or 0), float(r["stale_h"] or 0)))
     out = {"label": "Trail A/B", "rows": rows,
            "live_trail_pct": config.TRAIL_PCT,
            "friction_charged_pct": charged,
@@ -1137,8 +1149,8 @@ def render_markdown(r):
         A("|---|---:|---:|---:|")
         A("| **{}% (live)** | — | — | — |".format(sh.get("live_trail_pct")))
         for x in sh["rows"]:
-            A("| {}% (shadow) | {} | {} | {} |".format(
-                x["trail_pct"], x["n"],
+            A("| {} (shadow) | {} | {} | {} |".format(
+                x["label"], x["n"],
                 x["median_net_pct"] if x["median_net_pct"] is not None else "—",
                 x["win_rate"] if x["win_rate"] is not None else "—"))
         A("\n*{}*".format(sh.get("note", "")))
@@ -1388,9 +1400,9 @@ def render_html(r, marketing=False):
             A('<table><tr><th>Trail</th><th class="n">n</th>'
               '<th class="n">Median net%/trade</th><th class="n">Win rate</th></tr>')
             for x in sh["rows"]:
-                A('<tr><td>{}% (shadow)</td><td class="n">{}</td><td class="n">{}</td>'
+                A('<tr><td>{} (shadow)</td><td class="n">{}</td><td class="n">{}</td>'
                   '<td class="n">{}</td></tr>'.format(
-                      x["trail_pct"], x["n"],
+                      x["label"], x["n"],
                       x["median_net_pct"] if x["median_net_pct"] is not None else "—",
                       x["win_rate"] if x["win_rate"] is not None else "—"))
             A("</table>")

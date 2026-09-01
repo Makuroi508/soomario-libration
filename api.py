@@ -22,7 +22,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 import config
 from config import BASE_DIR, EQUITY_LOG, TRADE_LOG, STATUS_FILE, summary as config_summary
-from utils import tail_jsonl, load_json, iso
+from utils import tail_jsonl, load_json, iso, next_utc_reset, now_utc
+
 import report as report_mod
 
 logger = logging.getLogger("api")
@@ -136,6 +137,11 @@ def api_stats():
         "open_positions": open_n,
         "max_concurrent": config.MAX_CONCURRENT,
         "daily_halt": st.get("daily_halt", False),
+        # Computed here rather than read from the status file so the countdown
+        # stays correct even if the writer is wedged — a halted bot that has
+        # stopped ticking is exactly when you most want to know the reset time.
+        "daily_reset_at": next_utc_reset().isoformat(),
+        "seconds_to_reset": max(0, int((next_utc_reset() - now_utc()).total_seconds())),
         "closed_trades": n,
         "win_rate": round(wins / n * 100, 2) if n else None,
         "avg_net_pct": round(avg_net, 4),
@@ -160,14 +166,16 @@ def api_universe():
     it (Universe tab); absent on a fresh deploy."""
     HOT_BAND, WARM_BAND = 1.5, 3.0  # RSI points to a boundary (presentation tuning)
 
-    def heat(rsi):
+    def heat(rsi, coin=None):
         if rsi is None:
             return "dormant"
-        # distance below 50 (long brewing) or above 40 (short brewing)
-        for d in (config.LONG_LEVEL - rsi, rsi - config.SHORT_LEVEL):
+        # distance below the long level (long brewing) or above the short
+        # level (short brewing) -- per-coin, so CC's 65 straddle reads right
+        ll, sl = config.long_level(coin), config.short_level(coin)
+        for d in (ll - rsi, rsi - sl):
             if 0 < d <= HOT_BAND:
                 return "hot"
-        for d in (config.LONG_LEVEL - rsi, rsi - config.SHORT_LEVEL):
+        for d in (ll - rsi, rsi - sl):
             if 0 < d <= WARM_BAND:
                 return "warming"
         return "dormant"
@@ -185,7 +193,7 @@ def api_universe():
         m = meta_map.get(sym, {})
         coins.append({
             "coin": sym,
-            "state": "active" if sym in active else heat(rsi_map.get(sym)),
+            "state": "active" if sym in active else heat(rsi_map.get(sym), sym),
             "in_position": sym in active,
             "atr_pct": m.get("atr_pct"),
             "day_vol_usd": m.get("day_vol_usd"),
@@ -220,10 +228,17 @@ def api_shadow():
         "win_rate": round(sum(1 for x in live_nets if x > 0) / len(live_nets) * 100, 2) if live_nets else None,
     }
     shadows = []
-    for tp, s in sorted(db.shadow_summary().items()):
-        shadows.append({"trail_pct": tp, "n": s["n"],
-                        "median_net_pct": round(s["median_net_pct"], 4) if s["median_net_pct"] is not None else None,
-                        "win_rate": s["win_rate"]})
+    # Keys are floats for plain trail-width shadows and strings for rule
+    # shadows ("0.55+stale24h"), so sort on the string form - sorting the mixed
+    # set directly raises TypeError.
+    for key, sm in sorted(db.shadow_summary().items(), key=lambda kv: str(kv[0])):
+        shadows.append({"label": str(key),
+                        "trail_pct": sm.get("trail_pct", key),
+                        "stale_h": sm.get("stale_h"),
+                        "n": sm["n"],
+                        "median_net_pct": round(sm["median_net_pct"], 4)
+                        if sm["median_net_pct"] is not None else None,
+                        "win_rate": sm["win_rate"]})
     fric_avg, fric_n = db.measured_friction()
     is_meas = fric_avg is not None and fric_n >= 5
     return jsonify({
