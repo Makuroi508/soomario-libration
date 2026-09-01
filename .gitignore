@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+state/
+backtest/candles/
+backtest/candles_1m/
+backtest/candles_bn/

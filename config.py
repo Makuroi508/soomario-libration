@@ -105,6 +105,11 @@ MIN_ATR_PCT       = _f("MIN_ATR_PCT", 3.0)            # avg daily TR% floor (vol
 MIN_DAILY_VOL_USD = _f("MIN_DAILY_VOL_USD", 2_000_000)
 UNIVERSE_AUTOFILTER = _b("UNIVERSE_AUTOFILTER")       # off: log report only, never silently drop
 
+# ─── Reporting ──────────────────────────────────────────────────
+# /api/report returns full account financials. Set a token to gate it; leave
+# empty and the endpoint is open to anyone who can reach the dashboard.
+REPORT_TOKEN = os.getenv("REPORT_TOKEN", "").strip()
+
 # ─── Frozen strategy params (walk-forward validated) ────────────
 RSI_LEN       = _i("RSI_LEN", 14)
 RSI_TF        = os.getenv("RSI_TF", "4h")

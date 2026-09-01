@@ -251,6 +251,7 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
     <a data-tab="trades">Trades</a>
     <a data-tab="shadow">Trail A/B</a>
     <a data-tab="universe">Universe</a>
+    <a data-tab="reports">Reports</a>
   </div>
   <button class="sn-ham" onclick="document.getElementById('snMobile').style.display=(document.getElementById('snMobile').style.display==='flex'?'none':'flex')">☰</button>
 </nav>
@@ -260,6 +261,7 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
   <a data-tab="trades">Trades</a>
   <a data-tab="shadow">Trail A/B</a>
   <a data-tab="universe">Universe</a>
+  <a data-tab="reports">Reports</a>
 </div>
 
 <div class="mode-banner mode-PAPER" id="modeBanner">— connecting —</div>
@@ -483,7 +485,56 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
     </div>
   </section>
 
+  <!-- ════ REPORTS ════ -->
+  <section class="tab" id="tab-reports">
+    <div class="crd" style="padding:18px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div>
+          <div class="l" style="margin-bottom:4px">Period</div>
+          <select id="rpPeriod" style="padding:8px 10px;border-radius:7px;background:var(--card);
+            color:var(--fg);border:1px solid var(--line);font-size:14px">
+            <option value="lifetime">Lifetime</option>
+            <option value="ytd">Year to date</option>
+            <option value="90d">Last 90 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="7d">Last 7 days</option>
+          </select>
+        </div>
+        <div style="flex:1;min-width:150px">
+          <div class="l" style="margin-bottom:4px">Access token (only if REPORT_TOKEN is set)</div>
+          <input id="rpToken" type="password" placeholder="optional" autocomplete="off"
+            style="width:100%;padding:8px 10px;border-radius:7px;background:var(--card);
+            color:var(--fg);border:1px solid var(--line);font-size:14px">
+        </div>
+        <button id="rpRun" style="padding:9px 16px;border-radius:7px;border:1px solid var(--line);
+          background:var(--acc,#3884ff);color:#fff;font-size:14px;cursor:pointer">Generate</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <a id="rpHtml"   target="_blank" class="rp-dl">Open full report</a>
+        <a id="rpMkt"    target="_blank" class="rp-dl">Open marketing pack</a>
+        <a id="rpMd"     target="_blank" class="rp-dl">Markdown</a>
+        <a id="rpJson"   target="_blank" class="rp-dl">JSON</a>
+        <a id="rpZip"                    class="rp-dl">Download bundle (.zip)</a>
+      </div>
+      <div class="l" style="margin-top:10px;text-transform:none;letter-spacing:0">
+        The full report opens in a new tab — use Ctrl+P / Cmd+P then "Save as PDF".
+        The marketing pack carries only figures cleared for publication.
+      </div>
+    </div>
+
+    <div id="rpSummary"></div>
+  </section>
+
 </div>
+
+<style>
+.rp-dl{display:inline-block;padding:7px 13px;border-radius:7px;border:1px solid var(--line);
+  font-size:13px;text-decoration:none;color:var(--fg);background:var(--card);cursor:pointer}
+.rp-dl:hover{border-color:var(--acc,#3884ff)}
+.rp-warn{background:rgba(224,177,85,.12);border-left:3px solid #e0b155;padding:9px 12px;
+  border-radius:0 6px 6px 0;margin:8px 0;font-size:13px}
+.rp-bad{background:rgba(208,72,63,.12);border-left:3px solid #d0483f}
+</style>
 
 <script>
 /* ── fetch wrapper ── */
@@ -973,6 +1024,89 @@ async function loadUniverse(){
     </tr>`;
   }).join('');
 }
+
+/* ── reports ──
+   Read-only. Builds the query once and points every link at /api/report so the
+   browser does the download; nothing is cached client-side because the payload
+   is full account financials. */
+function rpQuery(fmt){
+  const p = document.getElementById('rpPeriod').value;
+  const t = document.getElementById('rpToken').value.trim();
+  return `/api/report?period=${encodeURIComponent(p)}&format=${fmt}` +
+         (t ? `&token=${encodeURIComponent(t)}` : '');
+}
+function rpSyncLinks(){
+  document.getElementById('rpHtml').href = rpQuery('html');
+  document.getElementById('rpMkt').href  = rpQuery('marketing_html');
+  document.getElementById('rpMd').href   = rpQuery('md');
+  document.getElementById('rpJson').href = rpQuery('json');
+  document.getElementById('rpZip').href  = rpQuery('zip');
+}
+async function rpRun(){
+  rpSyncLinks();
+  const box = document.getElementById('rpSummary');
+  box.innerHTML = '<div class="crd" style="padding:18px;color:var(--mute)">building…</div>';
+  let r;
+  try{
+    const resp = await fetch(rpQuery('json'), {cache:'no-store'});
+    if(resp.status === 401){
+      box.innerHTML = '<div class="crd" style="padding:18px"><div class="rp-warn rp-bad">' +
+        'Unauthorized — this dashboard has REPORT_TOKEN set. Enter the token above.</div></div>';
+      return;
+    }
+    if(!resp.ok){ throw new Error('HTTP '+resp.status); }
+    r = await resp.json();
+  }catch(e){
+    box.innerHTML = `<div class="crd" style="padding:18px"><div class="rp-warn rp-bad">Report failed: ${e.message}</div></div>`;
+    return;
+  }
+  const f = r.facts || {}, cap = (r.account&&r.account.capital)||{}, rec = r.reconciliation||{};
+  const kpi = (l,v,cls) => `<div class="tbl-stat"><div class="l">${l}</div><div class="v ${cls||''}">${v}</div></div>`;
+  const sgn = v => v==null?'':(v>=0?'pos':'neg');
+  let html = '<div class="tbl-head">' +
+    kpi('Realized P&L', fmt$(cap.realized_pnl), sgn(cap.realized_pnl)) +
+    kpi('Return on capital', fmtPct(f.return_on_inception), sgn(f.return_on_inception)) +
+    kpi('Max drawdown', fmtPct(f.max_drawdown), 'neg') +
+    kpi('Tail concentration', f.tail_concentration!=null?f.tail_concentration.toFixed(1)+'%':'—') +
+    kpi('Closed trades', f.closed_trades!=null?f.closed_trades.toLocaleString():'—') +
+    '</div>';
+
+  html += `<div class="crd" style="padding:16px 18px"><div class="l" style="text-transform:none;letter-spacing:0">
+    ${r.provenance.period_label} · ${r.provenance.window_start.slice(0,10)} → ${r.provenance.window_end.slice(0,10)}
+    (${r.provenance.days} days) · generated ${r.provenance.generated_utc.slice(0,19)}</div>`;
+  html += `<div class="${rec.ok?'rp-warn':'rp-warn rp-bad'}" style="${rec.ok?'background:rgba(74,222,128,.1);border-left-color:var(--gn)':''}">
+    Reconciliation <b>${rec.ok?'OK':'MISMATCH'}</b> — ${rec.scope} scope, window ${fmt$(rec.window_realized_pnl)}
+    over ${rec.trades_in_window} trades; lifetime recomputed ${fmt$(rec.lifetime_recomputed_pnl)} vs ledger
+    ${fmt$(rec.db_realized_pnl)} (delta ${rec.delta}), ${rec.trades_unpriced} unpriced.</div>`;
+
+  const L = r.ledger||{};
+  html += `<div class="l" style="text-transform:none;letter-spacing:0;margin-top:8px">
+    <b>${(L.publishable||[]).length}</b> publishable ·
+    <b>${(L.annualized_short_window||[]).length}</b> annualized from a short window ·
+    <b>${(L.not_publishable||[]).length}</b> withheld from publication</div></div>`;
+
+  // exit-reason table — the section that actually explains this strategy's P&L
+  const br = (r.tail&&r.tail.by_reason)||{};
+  if(Object.keys(br).length){
+    html += '<div class="crd" style="padding:0;overflow:hidden;margin-top:12px"><div class="tblwrap"><table class="dt">' +
+      '<thead><tr><th>Exit reason</th><th>Trades</th><th>Share</th><th>Total P&L</th><th>Avg P&L</th></tr></thead><tbody>';
+    for(const [k,v] of Object.entries(br)){
+      html += `<tr><td><b>${k}</b></td><td>${v.n}</td><td>${v.share_of_trades_pct}%</td>
+        <td class="${v.total_pnl>=0?'pos':'neg'}">${fmt$(v.total_pnl)}</td><td>${fmt$(v.avg_pnl)}</td></tr>`;
+    }
+    html += '</tbody></table></div></div>';
+  }
+  const tc = r.tail && r.tail.figures && r.tail.figures.tail_concentration;
+  if(tc){
+    html += `<div class="crd" style="padding:14px 18px;margin-top:12px"><div class="rp-warn">
+      <b>Tail concentration ${tc.value}%</b> — ${tc.basis} ${(tc.warnings||[]).join(' ')}</div></div>`;
+  }
+  box.innerHTML = html;
+}
+document.getElementById('rpRun').addEventListener('click', rpRun);
+document.getElementById('rpPeriod').addEventListener('change', rpSyncLinks);
+document.getElementById('rpToken').addEventListener('input', rpSyncLinks);
+rpSyncLinks();
 
 /* ── load cycle ── */
 async function loadAll(){ await Promise.all([loadStatus(),loadStats(),loadEquity(),loadPulse(),loadPositions(),loadTrades(),loadShadow(),loadUniverse()]); }
