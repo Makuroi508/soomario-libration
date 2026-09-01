@@ -261,7 +261,7 @@ def api_report():
     """Financial report bundle.
 
       ?period = lifetime | ytd | 90d | 30d | 7d      (default lifetime)
-      ?format = json | md | html | marketing | marketing_html | zip
+      ?format = json | md | html | marketing | marketing_html | tearsheet | zip
 
     Read-only: builds from the SQLite trade ledger with no network calls, so it
     cannot perturb the trading worker sharing this process. Gated on
@@ -302,12 +302,15 @@ def api_report():
     if fmt == "marketing_html":
         return Response(report_mod.render_html(rep, marketing=True),
                         mimetype="text/html; charset=utf-8")
+    if fmt == "tearsheet":
+        return Response(report_mod.render_tearsheet(rep),
+                        mimetype="text/html; charset=utf-8")
     if fmt == "zip":
         return Response(report_mod.bundle_zip(rep), mimetype="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
     return jsonify({"error": "bad format",
                     "allowed": ["json", "md", "html", "marketing",
-                                "marketing_html", "zip"]}), 400
+                                "marketing_html", "tearsheet", "zip"]}), 400
 
 
 # ═══════════════════════════════════════════════════════════════

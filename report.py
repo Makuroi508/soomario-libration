@@ -1495,6 +1495,275 @@ def render_html(r, marketing=False):
     return "".join(H)
 
 
+# ── tear sheet: one page for a platform or allocator ─────────────
+_TS_CSS = """
+:root{--bg:#fff;--fg:#12151a;--mut:#616b7a;--line:#e2e6ee;--soft:#f6f8fb;
+--acc:#2f6bd8;--good:#1f8a5a;--bad:#c23b32;--warnbg:#fff8e6;--warnbd:#d99b1a}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1014;--fg:#e8ebf1;--mut:#98a3b4;
+--line:#232a34;--soft:#141922;--warnbg:#241f10;--warnbd:#c99a2e}}
+*{box-sizing:border-box}
+body{margin:0;padding:26px 20px;background:var(--bg);color:var(--fg);
+font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.pg{max-width:940px;margin:0 auto}
+.hd{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;
+border-bottom:2px solid var(--fg);padding-bottom:12px;margin-bottom:4px;flex-wrap:wrap}
+.nm{font-size:27px;font-weight:700;letter-spacing:-.5px;line-height:1.1}
+.th{color:var(--mut);font-size:13.5px;margin-top:5px;max-width:520px}
+.asof{text-align:right;font-size:12px;color:var(--mut);line-height:1.7;white-space:nowrap}
+.meta{display:flex;gap:0;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;
+margin:14px 0 16px;overflow:hidden;background:var(--soft)}
+.meta div{flex:1;min-width:110px;padding:8px 12px;border-right:1px solid var(--line)}
+.meta div:last-child{border-right:0}
+.meta .k{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.meta .v{font-size:14px;font-weight:600;margin-top:2px}
+.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;margin:0 0 18px}
+.kpi{border:1px solid var(--line);border-radius:9px;padding:11px 12px;background:var(--soft)}
+.kpi .k{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);
+line-height:1.3;min-height:24px}
+.kpi .v{font-size:22px;font-weight:700;margin-top:3px;letter-spacing:-.5px}
+.kpi .s{font-size:10.5px;color:var(--mut);margin-top:1px}
+.pos{color:var(--good)}.neg{color:var(--bad)}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);
+margin:22px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{padding:5px 7px;border-bottom:1px solid var(--line);text-align:left}
+th{font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.chart{width:100%;height:auto;color:var(--fg);margin:4px 0}
+ul{margin:6px 0;padding-left:17px}li{margin:4px 0;font-size:13px}
+.warn{background:var(--warnbg);border:1px solid var(--warnbd);border-radius:8px;
+padding:12px 14px;margin:10px 0;font-size:12.5px}
+.warn b{display:block;margin-bottom:5px;font-size:11px;text-transform:uppercase;
+letter-spacing:.05em}
+.foot{margin-top:22px;padding-top:10px;border-top:1px solid var(--line);
+font-size:10.5px;color:var(--mut);line-height:1.65}
+@media print{body{padding:0}.kpis{grid-template-columns:repeat(6,1fr)}
+h2{page-break-after:avoid}.cols{page-break-inside:avoid}}
+@media(max-width:800px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}}
+"""
+
+
+def render_tearsheet(r):
+    """A one-page summary for a platform, allocator or listing desk.
+
+    Scope is deliberately narrower than the operator report. Included: what the
+    strategy is, what it returned, what it risked, and what a reader should
+    discount. Excluded: per-coin attribution (the ranking does not persist, so
+    publishing it invites decisions on noise), fill rate, slot utilisation and
+    friction (operational, not investor-facing), and the internal randomized-
+    timing benchmark (it is computed on third-party daily closes as a research
+    proxy, not on the live fills, so it belongs in research rather than in a
+    document someone allocates against).
+
+    Nothing here claims an edge the omitted tests contradict: the sheet reports
+    realized results and states the sample is short, and makes no claim that
+    entry timing is proven superior to chance.
+    """
+    p = r["provenance"]
+    cfg = p.get("strategy") or {}
+    figs = {}
+    for s in ("account", "tail", "execution"):
+        figs.update(r[s].get("figures", {}))
+    cap = r["account"]["capital"]
+    F = lambda k: figs.get(k)                                   # noqa: E731
+
+    def val(k, dash="—"):
+        f = figs.get(k)
+        return _fmt(f) if f else dash
+
+    H = ['<!doctype html><html><head><meta charset="utf-8">',
+         '<meta name="viewport" content="width=device-width,initial-scale=1">',
+         "<title>Libration — Strategy Tear Sheet</title>",
+         "<style>{}</style></head><body><div class='pg'>".format(_TS_CSS)]
+    A = H.append
+
+    # ── header ──
+    A('<div class="hd"><div><div class="nm">{}</div>'
+      '<div class="th">Systematic RSI mean-reversion on 4h closes across liquid '
+      'perpetual futures. Every position carries a resting hard stop from the '
+      'moment it opens; profits are taken by a ratcheting trailing stop. Fully '
+      'automated, no discretionary override.</div></div>'
+      '<div class="asof">As of <b>{}</b><br>{} · {} days live<br>{} closed trades</div></div>'
+      .format(cfg.get("name") or "Libration", p["window_end"][:10],
+              p["period_label"], p["days"], p["trades_in_scope"]))
+
+    # ── instrument / mechanics strip ──
+    def cell(k, v):
+        return '<div><div class="k">{}</div><div class="v">{}</div></div>'.format(k, v)
+    A('<div class="meta">'
+      + cell("Venue", (cfg.get("exchange") or "hyperliquid").title())
+      + cell("Instrument", "Perpetual futures")
+      + cell("Signal", "RSI " + str(cfg.get("rsi", "14@4h")))
+      + cell("Leverage", "{:g}x".format(float(cfg.get("leverage", 2))))
+      + cell("Size / position", "{:.0%} of equity".format(cfg.get("notional_frac", 0.2)))
+      + cell("Max concurrent", cfg.get("max_concurrent", 10))
+      + cell("Universe", "{} coins".format(len(cfg.get("coins") or [])))
+      + "</div>")
+
+    # ── headline KPIs ──
+    def kpi(k, v, sub="", cls=""):
+        return ('<div class="kpi"><div class="k">{}</div><div class="v {}">{}</div>'
+                '<div class="s">{}</div></div>').format(k, cls, v, sub)
+
+    roi = F("return_on_inception")
+    mdd = F("max_drawdown")
+    shp = F("sharpe")
+    wr = F("win_rate")
+    tiles = [
+        kpi("Return on capital", "{:+.2f}%".format(roi["value"]) if roi else "—",
+            "realized, {} days".format(p["days"]),
+            "pos" if roi and roi["value"] >= 0 else "neg"),
+        kpi("Realized P&amp;L", _money(cap["realized_pnl"]),
+            "net of all fees", "pos" if cap["realized_pnl"] >= 0 else "neg"),
+        kpi("Max drawdown", "{:.2f}%".format(mdd["value"]) if mdd else "—",
+            "peak to trough", "neg"),
+        kpi("Sharpe", "{:.2f}".format(shp["value"]) if shp else "—",
+            "daily returns, annualized"),
+        kpi("Win rate", "{:.1f}%".format(wr["value"]) if wr else "—",
+            "of {} round-trips".format(p["trades_in_scope"])),
+        kpi("Avg trade", val("expectancy"), "per round-trip"),
+    ]
+    A('<div class="kpis">' + "".join(tiles) + "</div>")
+
+    # ── equity ──
+    curve = [(x["d"], x["v"]) for x in r["account"].get("curve", [])]
+    if len(curve) > 1:
+        A("<h2>Realized equity</h2>")
+        A(_svg_line(curve, h=200, label="realized equity"))
+        A('<p style="font-size:11px;color:var(--mut);margin:2px 0 0">Rebuilt trade '
+          "by trade from the execution ledger, so deposits and withdrawals cannot "
+          "flatter the curve. Open positions are excluded.</p>")
+
+    # ── two columns: monthly | risk ──
+    A('<div class="cols">')
+
+    A("<div><h2>Monthly returns</h2>")
+    cal = (r["account"].get("calendar") or {}).get("months") or []
+    if cal:
+        A(_svg_bars([(m["month"][5:], m["return_pct"]) for m in cal], h=150,
+                    label="monthly returns"))
+        A('<table><tr><th>Month</th><th class="n">Return</th>'
+          '<th class="n">Worst DD in month</th></tr>')
+        for m in cal:
+            A('<tr><td>{}</td><td class="n {}">{:+.2f}%</td>'
+              '<td class="n neg">{:.2f}%</td></tr>'.format(
+                  m["month"], "pos" if m["return_pct"] >= 0 else "neg",
+                  m["return_pct"], m["max_drawdown_pct"]))
+        A("</table>")
+        A('<p style="font-size:11px;color:var(--mut);margin:6px 0 0">First and '
+          "last months are partial.</p>")
+    else:
+        A('<p style="color:var(--mut)">Not enough history yet.</p>')
+    A("</div>")
+
+    A("<div><h2>Risk profile</h2><table>")
+    rows = [
+        ("Hard stop", "{:g}% per position".format(float(cfg.get("hard_stop_pct", 10))),
+         "resting order at the venue, attached with the entry"),
+        ("Trailing stop", "{:g}%".format(float(cfg.get("trail_pct", 0.55))),
+         "arms in profit, ratchets, never moves against"),
+        ("Daily loss halt", "{:g}%".format(float(cfg.get("daily_dd_pct", 5))),
+         "stops new entries for the UTC day"),
+        ("Max drawdown", "{:.2f}%".format(mdd["value"]) if mdd else "—",
+         "observed peak to trough"),
+        ("Worst month", val("worst_month"), "calendar month"),
+        ("Worst day", val("worst_day"), "single day"),
+        ("Time under water", val("time_under_water"), "days below high-water mark"),
+        ("Longest losing streak", val("max_consecutive_losses"), "consecutive trades"),
+    ]
+    A('<tr><th>Control / measure</th><th class="n">Value</th><th>Basis</th></tr>')
+    for k, v, b in rows:
+        A('<tr><td>{}</td><td class="n"><b>{}</b></td>'
+          '<td style="color:var(--mut);font-size:11.5px">{}</td></tr>'.format(k, v, b))
+    A("</table></div>")
+    A("</div>")
+
+    # ── the tail: the single most important risk disclosure here ──
+    tc = F("tail_concentration")
+    hs = F("hard_stop_rate")
+    if tc:
+        A("<h2>Where the risk actually sits</h2>")
+        A('<div class="warn"><b>Read this before the win rate</b>'
+          "A high win rate does not describe this strategy's risk. Most trades "
+          "close as small trailing-stop wins; the outcome of any period is "
+          "decided by how many positions hit the {:g}% hard stop, and those "
+          "cluster in time because they are driven by market-wide moves rather "
+          "than by any single coin. <b style='display:inline;text-transform:none;"
+          "letter-spacing:0;font-size:12.5px'>Over this period {:.0f}% of gross "
+          "winnings were consumed by the {:.1f}% of trades that stopped out.</b> "
+          "Net profit is whatever survives that tail."
+          .format(float(cfg.get("hard_stop_pct", 10)), tc["value"],
+                  hs["value"] if hs else 0))
+        A("</div>")
+
+    # ── mechanics ──
+    A("<h2>How it works</h2><ul>")
+    A("<li><b>Entry</b> — RSI(14) evaluated only on a completed 4h close. Long on "
+      "a cross up through {}, short on a cross down through {}. The forming bar "
+      "is never used, so a signal cannot repaint.</li>".format(
+          cfg.get("levels", "L50/S40").split("/")[0].lstrip("L"),
+          cfg.get("levels", "L50/S40").split("/")[-1].lstrip("S")))
+    A("<li><b>Exit</b> — a {:g}% trailing stop arms once the position is in profit "
+      "and ratchets behind the peak. There is no take-profit target; the trail is "
+      "the profit exit.</li>".format(float(cfg.get("trail_pct", 0.55))))
+    A("<li><b>Downside</b> — a {:g}% hard stop rests at the venue from the moment "
+      "the position opens, attached atomically with the entry so a position can "
+      "never sit unprotected.</li>".format(float(cfg.get("hard_stop_pct", 10))))
+    A("<li><b>Sizing</b> — {:.0%} of equity per position at {}x leverage, capped "
+      "at {} concurrent positions and one position per coin. Gross exposure is "
+      "bounded by construction.</li>".format(
+          cfg.get("notional_frac", 0.2), "{:g}".format(float(cfg.get("leverage", 2))),
+          cfg.get("max_concurrent", 10)))
+    A("<li><b>Operation</b> — fully automated, polling continuously; positions are "
+      "reconciled against the venue every cycle and the venue is treated as the "
+      "source of truth. No discretionary intervention.</li>")
+    A("</ul>")
+
+    # ── honest limits ──
+    A("<h2>What to discount</h2>")
+    A('<div class="warn"><b>Limits of this record</b><ul style="margin:0">')
+    A("<li><b>{} days of live history.</b> Any annualized figure on this sheet "
+      "is a projection from under a year of data, not an achieved annual return. "
+      "Short windows exaggerate.</li>".format(p["days"]))
+    lim = []
+    for k in ("cagr", "sharpe", "sortino", "calmar", "volatility"):
+        f = figs.get(k)
+        if f and f["status"] == ANNUALIZED_SHORT_WINDOW:
+            lim.append(f["label"])
+    if lim:
+        A("<li>Annualized and therefore projected: {}.</li>".format(", ".join(lim)))
+    A("<li><b>Maximum drawdown is a running extremum.</b> It can only grow with a "
+      "longer sample, so treat {} as a lower bound on observed history rather "
+      "than an estimate of future risk.</li>".format(
+          "{:.2f}%".format(mdd["value"]) if mdd else "the figure shown"))
+    A("<li><b>Account scale.</b> These results were produced on a single account "
+      "of roughly {}. Capacity at materially larger size is untested, and "
+      "slippage on this venue would grow with order size.</li>".format(
+          _money(cap["end_equity_realized"])))
+    A("<li><b>Leverage and correlated stops.</b> This is a leveraged perpetual "
+      "futures strategy. A hard stop costs roughly {:.1f}% of equity per position, "
+      "and stops arrive together in market-wide moves rather than independently.</li>"
+      .format(cfg.get("notional_frac", 0.2) * cfg.get("hard_stop_pct", 10)))
+    A("<li><b>Past performance is not indicative of future results.</b></li>")
+    A("</ul></div>")
+
+    rec = r.get("reconciliation") or {}
+    A('<div class="foot">')
+    A("Figures are realized round-trip results computed from the bot's own "
+      "execution ledger, net of exchange fees and observed slippage. "
+      "Reconciliation status: <b>{}</b> across {} closed trades. "
+      "Generated {} from live data with no manual adjustment."
+      .format("passed" if rec.get("ok") else "review required",
+              rec.get("trades_in_window", p["trades_in_scope"]),
+              p["generated_utc"][:19]))
+    A("<br><br>Nothing on this sheet is an offer, a solicitation, or investment "
+      "advice. Trading leveraged perpetual futures can result in the total loss "
+      "of deposited funds.")
+    A("</div></div></body></html>")
+    return "".join(H)
+
+
 def bundle_zip(r):
     """The downloadable pack: same shape as the Accumulator bundle."""
     buf = io.BytesIO()
@@ -1504,6 +1773,7 @@ def bundle_zip(r):
         z.writestr("report.html", render_html(r))
         z.writestr("marketing.md", render_marketing_markdown(r))
         z.writestr("marketing.html", render_html(r, marketing=True))
+        z.writestr("tearsheet.html", render_tearsheet(r))
         z.writestr("facts.json", json.dumps(
             {**r["facts"], "RETIRED_do_not_publish": r["do_not_publish"]},
             indent=2, default=str))

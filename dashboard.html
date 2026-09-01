@@ -511,13 +511,14 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
         <a id="rpHtml"   target="_blank" class="rp-dl">Open full report</a>
+        <a id="rpTear"   target="_blank" class="rp-dl">Open tear sheet</a>
         <a id="rpMkt"    target="_blank" class="rp-dl">Open marketing pack</a>
         <a id="rpMd"     target="_blank" class="rp-dl">Markdown</a>
         <a id="rpJson"   target="_blank" class="rp-dl">JSON</a>
         <a id="rpZip"                    class="rp-dl">Download bundle (.zip)</a>
       </div>
       <div class="l" style="margin-top:10px;text-transform:none;letter-spacing:0">
-        The full report opens in a new tab — use Ctrl+P / Cmd+P then "Save as PDF".
+        The tear sheet is the one-pager for a platform or allocator. Reports open in a new tab — use Ctrl+P / Cmd+P then "Save as PDF".
         The marketing pack carries only figures cleared for publication.
       </div>
     </div>
@@ -1070,6 +1071,7 @@ function rpQuery(fmt){
 }
 function rpSyncLinks(){
   document.getElementById('rpHtml').href = rpQuery('html');
+  document.getElementById('rpTear').href = rpQuery('tearsheet');
   document.getElementById('rpMkt').href  = rpQuery('marketing_html');
   document.getElementById('rpMd').href   = rpQuery('md');
   document.getElementById('rpJson').href = rpQuery('json');
