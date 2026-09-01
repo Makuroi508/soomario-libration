@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import random
 import statistics as st
 import zipfile
 from collections import Counter, defaultdict
@@ -53,6 +54,27 @@ ANNUALIZED_WARNING = (
     "become large differences once annualized."
 )
 
+# Figures that ARE published but must not travel alone. The reference report's
+# rule: the caveat is part of the quotable sentence, so the number cannot be
+# lifted out of context without also lifting the qualification.
+CONTEXT_REQUIRED = {
+    "win_rate": (
+        "Win rate is not a performance figure for this strategy on its own. The "
+        "live account posted its HIGHEST win rate (82%) during a LOSING three-week "
+        "period, because nine hard stops clustered. Always quote it beside tail "
+        "concentration and the hard-stop rate."
+    ),
+    "profit_factor": (
+        "A ratio of sums, so a handful of outliers can dominate it at this sample "
+        "size. Read it beside 'Net P&L excluding largest winner' — if that figure "
+        "moves materially, the profit factor rests on one or two trades."
+    ),
+    "cagr": (
+        "Annualized from under a year. Quote the cumulative return as the headline "
+        "and CAGR only with its window stated."
+    ),
+}
+
 # Metrics that must never reach a marketing surface, and why. Each entry is a
 # finding, not an opinion — see the reason string.
 DO_NOT_PUBLISH = {
@@ -65,16 +87,6 @@ DO_NOT_PUBLISH = {
         "Sharpe computed on per-trade returns and annualized as if daily is an "
         "artifact — at ~9 trades/day it inflates by roughly sqrt(9). Use `sharpe`, "
         "which is computed on DAILY equity returns, and quote its confidence interval."
-    ),
-    "win_rate_alone": (
-        "Win rate is not a performance figure for this strategy. The live account "
-        "posted its HIGHEST win rate (82%) during a losing three-week period, "
-        "because nine hard stops clustered. Quote it only beside tail_concentration."
-    ),
-    "profit_factor": (
-        "Ratio of sums, dominated by a handful of outliers at this sample size. "
-        "Needs the largest-winner robustness check (reported as pnl_excl_largest_win) "
-        "before any publication."
     ),
 }
 
@@ -236,7 +248,9 @@ def _account_section(trades, inception, days, upnl):
             "%", len(series), days,
             "share of days below the running equity high-water mark")
 
-    return {"label": "Account", "days": days,
+    calendar, figs = _investor_metrics(series, trades, inception, days, figs)
+
+    return {"label": "Account", "days": days, "calendar": calendar,
             "capital": {"inception": round(inception or 0.0, 2),
                         "realized_pnl": round(realized, 2),
                         "unrealized_pnl": round(upnl or 0.0, 2),
@@ -246,6 +260,172 @@ def _account_section(trades, inception, days, upnl):
                                 "moves with open marks and is shown separately."},
             "figures": figs,
             "curve": [{"d": str(d), "v": round(v, 2)} for d, v in series]}
+
+
+# ── section 1b: investor metrics ─────────────────────────────────
+def _investor_metrics(series, trades, inception, days, figs):
+    """The figures an investor or trader expects to see, added to `figs`.
+
+    Two are here under protest and carry it in their warnings: CAGR annualizes a
+    sub-year window, and profit factor is a ratio of sums that a couple of
+    outliers can dominate. Both are standard, both are requested, and both are
+    reported WITH the caveat rather than omitted — the reference report's rule is
+    that the caveat travels with the number, not that awkward numbers disappear.
+    """
+    if not series:
+        return {}, {}
+
+    start_eq = inception if inception else series[0][1]
+    end_eq = series[-1][1]
+    yrs = max(days, 1) / YEAR_DAYS
+
+    # ── CAGR ──
+    if start_eq > 0 and end_eq > 0:
+        cagr = ((end_eq / start_eq) ** (1 / yrs) - 1) * 100
+        f = _fig("cagr", "CAGR", round(cagr, 2), "%", len(series), days,
+                 "({:,.2f} / {:,.2f}) ^ (365/{}) - 1, on realized equity".format(
+                     end_eq, start_eq, days))
+        if days < YEAR_DAYS:
+            f["status"] = ANNUALIZED_SHORT_WINDOW
+            f["warnings"].append(ANNUALIZED_WARNING.format(days=days))
+            f["warnings"].append(CONTEXT_REQUIRED["cagr"])
+            f["warnings"].append(
+                "Compounding {} days to a full year magnifies the window: a period "
+                "that happened to run well projects to an annual figure the "
+                "strategy has never achieved. Quote the cumulative return "
+                "alongside it.".format(days))
+        figs["cagr"] = f
+
+    # ── drawdown from the top (where the account sits right now) ──
+    peak = max(v for _, v in series)
+    cur_dd = (end_eq - peak) / peak * 100 if peak > 0 else 0.0
+    peak_d = next((str(d) for d, v in series if v == peak), None)
+    figs["drawdown_from_top"] = _fig(
+        "drawdown_from_top", "Drawdown from the top", round(cur_dd, 2), "%",
+        len(series), days,
+        "current realized equity {:,.2f} against the all-time peak {:,.2f} "
+        "(set {})".format(end_eq, peak, peak_d),
+        detail={"peak": round(peak, 2), "peak_date": peak_d,
+                "current": round(end_eq, 2)})
+
+    # ── per-month drawdown + calendar returns ──
+    by_month = defaultdict(list)
+    for d, v in series:
+        by_month[d.strftime("%Y-%m")].append((d, v))
+    monthly = []
+    for m in sorted(by_month):
+        pts = by_month[m]
+        base = pts[0][1]
+        mpeak, mworst = base, 0.0
+        for _, v in pts:
+            mpeak = max(mpeak, v)
+            if mpeak > 0:
+                mworst = min(mworst, (v - mpeak) / mpeak * 100)
+        ret = (pts[-1][1] / base - 1) * 100 if base > 0 else 0.0
+        monthly.append({"month": m, "return_pct": round(ret, 2),
+                        "max_drawdown_pct": round(mworst, 2), "days": len(pts)})
+    if monthly:
+        worst_m = min(monthly, key=lambda x: x["max_drawdown_pct"])
+        figs["monthly_max_drawdown"] = _fig(
+            "monthly_max_drawdown", "Worst monthly drawdown",
+            worst_m["max_drawdown_pct"], "%", len(monthly), days,
+            "deepest peak-to-trough WITHIN a single calendar month ({}). Measured "
+            "inside each month, so it is not the same as the all-time drawdown."
+            .format(worst_m["month"]),
+            detail={"month": worst_m["month"]})
+        best = max(monthly, key=lambda x: x["return_pct"])
+        worst = min(monthly, key=lambda x: x["return_pct"])
+        figs["best_month"] = _fig(
+            "best_month", "Best month", best["return_pct"], "%", len(monthly), days,
+            "calendar-month return on realized equity ({})".format(best["month"]))
+        figs["worst_month"] = _fig(
+            "worst_month", "Worst month", worst["return_pct"], "%", len(monthly), days,
+            "calendar-month return on realized equity ({})".format(worst["month"]))
+        if len(monthly) < 3:
+            for k in ("best_month", "worst_month", "monthly_max_drawdown"):
+                figs[k]["warnings"].append(
+                    "Only {} calendar months in the sample, and the first and last "
+                    "are partial.".format(len(monthly)))
+
+    # ── risk-adjusted on drawdown ──
+    mdd = figs.get("max_drawdown", {}).get("value")
+    if mdd and mdd < 0:
+        if "cagr" in figs:
+            figs["calmar"] = _annualized(_fig(
+                "calmar", "Calmar ratio", round(figs["cagr"]["value"] / abs(mdd), 2),
+                "", len(series), days, "CAGR / |maximum drawdown|"), days)
+        net = end_eq - start_eq
+        dd_usd = abs(mdd) / 100 * max(v for _, v in series)
+        if dd_usd > 0:
+            figs["recovery_factor"] = _fig(
+                "recovery_factor", "Recovery factor", round(net / dd_usd, 2), "",
+                len(series), days,
+                "net profit {:,.2f} / peak drawdown {:,.2f} in dollars".format(
+                    net, dd_usd))
+
+    # ── trade-shape figures ──
+    pnls = [p for p in (trade_pnl(t) for t in trades) if p is not None]
+    if pnls:
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        if wins and losses and st.mean(losses) != 0:
+            figs["win_loss_ratio"] = _fig(
+                "win_loss_ratio", "Average win / average loss",
+                round(st.mean(wins) / abs(st.mean(losses)), 2), "", len(pnls), days,
+                "mean winning trade {} / mean losing trade {}".format(
+                    _money(st.mean(wins)), _money(abs(st.mean(losses)))))
+        figs["largest_win"] = _fig(
+            "largest_win", "Largest single win", round(max(pnls), 2), "USD",
+            len(pnls), days, "best round-trip in the window")
+        figs["largest_loss"] = _fig(
+            "largest_loss", "Largest single loss", round(min(pnls), 2), "USD",
+            len(pnls), days, "worst round-trip in the window")
+        figs["trades_per_month"] = _fig(
+            "trades_per_month", "Trades per month",
+            round(len(pnls) / max(days / 30.44, 0.1), 1), "", len(pnls), days,
+            "{} closed round-trips over {} days".format(len(pnls), days))
+
+    holds = []
+    for t in trades:
+        o, x = _parse(t.get("opened_at")), _parse(t.get("closed_at"))
+        if o and x:
+            holds.append((x - o).total_seconds() / 3600)
+    if holds:
+        figs["avg_hold_hours"] = _fig(
+            "avg_hold_hours", "Average holding period", round(st.mean(holds), 1),
+            "hours", len(holds), days,
+            "entry to exit, mean; median {:.1f}h".format(st.median(holds)),
+            detail={"median_hours": round(st.median(holds), 1),
+                    "max_hours": round(max(holds), 1)})
+
+    # ── daily-return tail risk ──
+    rets = []
+    for i in range(1, len(series)):
+        prev = series[i - 1][1]
+        if prev > 0:
+            rets.append((series[i][1] - prev) / prev * 100)
+    if len(rets) >= 20:
+        srt = sorted(rets)
+        var5 = srt[max(0, int(len(srt) * 0.05) - 1)]
+        tail = [r for r in srt if r <= var5]
+        figs["var_95_daily"] = _fig(
+            "var_95_daily", "Daily VaR (95%)", round(var5, 2), "%", len(rets), days,
+            "5th percentile of daily realized-equity returns: one day in twenty "
+            "was worse than this")
+        if tail:
+            figs["cvar_95_daily"] = _fig(
+                "cvar_95_daily", "Daily CVaR (95%)", round(st.mean(tail), 2), "%",
+                len(tail), days, "mean of the worst 5% of days")
+        figs["best_day"] = _fig("best_day", "Best day", round(max(rets), 2), "%",
+                                len(rets), days, "best single realized-equity day")
+        figs["worst_day"] = _fig("worst_day", "Worst day", round(min(rets), 2), "%",
+                                 len(rets), days, "worst single realized-equity day")
+
+    calendar = {"months": monthly,
+                "note": "Monthly returns are computed on the realized-equity curve, "
+                        "so open positions cannot flatter a month. The first and "
+                        "last months are partial."}
+    return calendar, figs
 
 
 # ── section 2: the tail (Libration's defining risk) ──────────────
@@ -293,8 +473,8 @@ def _tail_section(trades, days):
 
     figs["win_rate"] = _fig(
         "win_rate", "Win rate", round(len(wins) / len(rows) * 100, 2), "%", len(rows),
-        days, "share of round-trips with net P&L > 0", publishable=False)
-    figs["win_rate"]["warnings"].append(DO_NOT_PUBLISH["win_rate_alone"])
+        days, "share of round-trips with net P&L > 0")
+    figs["win_rate"]["warnings"].append(CONTEXT_REQUIRED["win_rate"])
 
     if wins and losses:
         aw, al = st.mean(wins), st.mean(losses)
@@ -308,8 +488,9 @@ def _tail_section(trades, days):
             figs["profit_factor"] = _fig(
                 "profit_factor", "Profit factor",
                 round(gross_win / abs(sum(losses)), 2), "", len(rows), days,
-                "gross winnings / gross losses", publishable=False)
-            figs["profit_factor"]["warnings"].append(DO_NOT_PUBLISH["profit_factor"])
+                "gross winnings {} / gross losses {}".format(
+                    _money(gross_win), _money(abs(sum(losses)))))
+            figs["profit_factor"]["warnings"].append(CONTEXT_REQUIRED["profit_factor"])
 
     # Robustness: does a single trade carry the whole record?
     allp = [p for _, p in rows]
@@ -517,6 +698,178 @@ def _reconciliation(db, trades, is_lifetime, all_trades):
     return out
 
 
+# ── benchmarks ───────────────────────────────────────────────────
+def _series_returns(prices, dates):
+    """Daily simple returns for one coin over `dates`, skipping gaps."""
+    out, prev = [], None
+    for d in dates:
+        px = prices.get(d)
+        if px is None or px <= 0:
+            continue
+        if prev is not None:
+            out.append(px / prev - 1.0)
+        prev = px
+    return out
+
+
+def _compound(rets):
+    eq = 1.0
+    for r in rets:
+        eq *= (1.0 + r)
+    return (eq - 1.0) * 100
+
+
+def _dd_of(rets):
+    eq, peak, worst = 1.0, 1.0, 0.0
+    for r in rets:
+        eq *= (1.0 + r)
+        peak = max(peak, eq)
+        worst = min(worst, (eq - peak) / peak * 100)
+    return worst
+
+
+def _benchmarks(db, trades, start, end, strat_return_pct, strat_dd_pct,
+                strat_mean_net_pct=None):
+    """What the same window would have paid without the signal.
+
+    Everything here is priced off the persisted daily_prices table, so the report
+    stays offline. Daily closes cannot reproduce intraday stop fills, so these
+    rows answer 'was the TIMING worth anything' — not 'what would the bot have
+    done'. That distinction is stated in the payload, not buried here.
+
+    B1  Equal-weight buy-and-hold across the coins actually traded. Difference
+        vs the strategy isolates whether entering and exiting beat sitting still.
+    B2  Randomized-entry timing null: the same coins, the same NUMBER of trades
+        and the same holding durations, but entry dates drawn at random from the
+        window. Difference isolates TIMING — the core claim of a signal bot.
+    B3  BTC buy-and-hold, as market context only.
+    """
+    coins = sorted({(t.get("coin") or "").upper() for t in trades if t.get("coin")})
+    s_date, e_date = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    px = db.price_series(coins + ["BTC"], s_date, e_date)
+    cov = db.price_coverage()
+
+    usable = [c for c in coins if len(px.get(c, {})) >= 10]
+    if not usable:
+        return {"status": INSUFFICIENT_DATA, "coverage": cov,
+                "note": "No daily price history yet for the traded coins. The bot "
+                        "persists a daily close for every coin it screens, so this "
+                        "section fills in on its own — the first pass after deploy "
+                        "backfills roughly 33 days from the candles already pulled "
+                        "for RSI. Benchmarks appear once at least 10 days exist."}
+
+    all_dates = sorted({d for c in usable for d in px[c]})
+    rows = []
+
+    # B1 — equal-weight buy and hold
+    per_day = []
+    for i in range(1, len(all_dates)):
+        d0, d1 = all_dates[i - 1], all_dates[i]
+        legs = []
+        for c in usable:
+            a, b = px[c].get(d0), px[c].get(d1)
+            if a and b and a > 0:
+                legs.append(b / a - 1.0)
+        if legs:
+            per_day.append(sum(legs) / len(legs))
+    rows.append({"key": "B1", "label": "Equal-weight buy & hold, same coins",
+                 "return_pct": round(_compound(per_day), 2),
+                 "max_dd_pct": round(_dd_of(per_day), 2),
+                 "isolates": "Whether trading at all beat sitting still in the same coins."})
+
+    # B2 — randomized-entry timing null, matched on trade count and duration
+    holds, counts = defaultdict(list), Counter()
+    for t in trades:
+        c = (t.get("coin") or "").upper()
+        o, x = _parse(t.get("opened_at")), _parse(t.get("closed_at"))
+        if c in px and o and x:
+            counts[c] += 1
+            holds[c].append(max(1, (x - o).days))
+    rnd = random.Random(20260901)          # fixed seed: a report must reproduce
+    sims = []
+    for _ in range(200):
+        legs = []
+        for c in usable:
+            n = counts.get(c, 0)
+            if not n:
+                continue
+            dates = sorted(px[c])
+            for _ in range(n):
+                hold = rnd.choice(holds[c]) if holds[c] else 1
+                if len(dates) - hold - 1 <= 0:
+                    continue
+                i = rnd.randrange(0, len(dates) - hold - 1)
+                a, b = px[c][dates[i]], px[c][dates[min(i + hold, len(dates) - 1)]]
+                if a and a > 0:
+                    legs.append((b / a - 1.0) * 100)
+        if legs:
+            sims.append(st.mean(legs))
+    if sims:
+        sims.sort()
+        rows.append({"key": "B2", "label": "Randomized entry timing, matched trades",
+                     "return_pct": round(st.mean(sims), 3),
+                     "max_dd_pct": None,
+                     "detail": {"runs": len(sims), "unit": "mean % per trade",
+                                "p05": round(sims[int(len(sims) * .05)], 3),
+                                "p95": round(sims[int(len(sims) * .95)], 3)},
+                     "isolates": "TIMING. Same coins, same trade count, same hold "
+                                 "durations, entry dates drawn at random."})
+
+    # B3 — BTC context
+    btc = px.get("BTC", {})
+    if len(btc) >= 10:
+        br = _series_returns(btc, sorted(btc))
+        rows.append({"key": "B3", "label": "BTC buy & hold",
+                     "return_pct": round(_compound(br), 2),
+                     "max_dd_pct": round(_dd_of(br), 2),
+                     "isolates": "Market context only — a different risk profile, "
+                                 "not a like-for-like claim."})
+
+    # Adjudicate B2 rather than leaving the reader to eyeball it: if the strategy's
+    # mean return per trade falls inside the randomized-timing band, the entry
+    # timing is not distinguishable from chance over this window.
+    verdict = None
+    b2 = next((r for r in rows if r["key"] == "B2"), None)
+    if b2 and strat_mean_net_pct is not None:
+        lo, hi = b2["detail"]["p05"], b2["detail"]["p95"]
+        inside = lo <= strat_mean_net_pct <= hi
+        verdict = {
+            "strategy_mean_net_pct_per_trade": round(strat_mean_net_pct, 3),
+            "random_band_p05_p95": [lo, hi],
+            "random_mean": b2["return_pct"],
+            "timing_beats_chance": not inside and strat_mean_net_pct > hi,
+            "statement": (
+                "The strategy averaged {:+.3f}% net per trade. Random entry timing "
+                "over the same coins, trade count and hold durations produced "
+                "{:+.3f}% on average, with a 5th-95th percentile band of {:+.3f}% "
+                "to {:+.3f}%. The strategy's result falls {} that band, so over "
+                "this window the entry timing {}."
+            ).format(strat_mean_net_pct, b2["return_pct"], lo, hi,
+                     "INSIDE" if inside else ("ABOVE" if strat_mean_net_pct > hi else "BELOW"),
+                     "is not distinguishable from chance" if inside else
+                     ("beat chance" if strat_mean_net_pct > hi else "underperformed chance")),
+        }
+
+    return {"status": OK, "coverage": cov, "coins_priced": len(usable),
+            "timing_verdict": verdict,
+            "window": {"start": s_date, "end": e_date},
+            "strategy": {"return_pct": strat_return_pct, "max_dd_pct": strat_dd_pct},
+            "rows": rows,
+            "methodology": "Priced from the persisted daily_prices table so the "
+                           "report performs no network calls. Daily closes cannot "
+                           "reproduce intraday stop fills, so these rows test "
+                           "whether the timing added value — they do not simulate "
+                           "the bot.",
+            "material_notes": [
+                "B1 and B3 are unlevered buy-and-hold; the strategy runs 2x "
+                "leverage with a 10% stop, so risk profiles differ and the return "
+                "columns are not directly comparable without that in mind.",
+                "B2 is the load-bearing comparison: if the strategy's mean return "
+                "per trade sits inside B2's p05-p95 band, the entry timing is not "
+                "distinguishable from chance over this window.",
+            ]}
+
+
 # ── periods ──────────────────────────────────────────────────────
 PERIODS = {"lifetime": None, "ytd": "ytd", "90d": 90, "30d": 30, "7d": 7}
 
@@ -554,6 +907,17 @@ def build(db, period="lifetime", status=None):
     sec_exec = _execution_section(db, trades, days)
     sec_coin = _per_coin_section(trades, inception)
     sec_shadow = _shadow_section(db, days)
+    _roi = sec_account["figures"].get("return_on_inception")
+    _dd = sec_account["figures"].get("max_drawdown")
+    try:
+        _nets = [t.get("net_pct") for t in trades if t.get("net_pct") is not None]
+        bench = _benchmarks(db, trades, start, end,
+                            _roi["value"] if _roi else None,
+                            _dd["value"] if _dd else None,
+                            st.mean(_nets) if _nets else None)
+    except Exception as e:                                   # noqa: BLE001
+        bench = {"status": INSUFFICIENT_DATA,
+                 "note": "benchmark computation failed: {}".format(e)}
 
     # Ledger: every figure classified, nothing silently dropped.
     figures = {}
@@ -570,8 +934,11 @@ def build(db, period="lifetime", status=None):
 
     facts = {"as_of": end.isoformat(), "period": plabel, "days": days,
              "closed_trades": len(trades)}
-    for k in ("realized_pnl", "return_on_inception", "max_drawdown", "sharpe",
-              "volatility", "tail_concentration", "hard_stop_rate", "expectancy"):
+    for k in ("realized_pnl", "return_on_inception", "cagr", "max_drawdown",
+              "drawdown_from_top", "monthly_max_drawdown", "sharpe", "sortino",
+              "calmar", "volatility", "win_rate", "profit_factor",
+              "tail_concentration", "hard_stop_rate", "expectancy",
+              "win_loss_ratio", "avg_hold_hours", "best_month", "worst_month"):
         if k in figures:
             facts[k] = figures[k]["value"]
 
@@ -594,17 +961,12 @@ def build(db, period="lifetime", status=None):
         "execution": sec_exec,
         "per_coin": sec_coin,
         "shadow": sec_shadow,
-        "benchmarks": {
-            "status": INSUFFICIENT_DATA,
-            "note": "Benchmarks (buy-and-hold, randomized-entry timing null) need a "
-                    "persisted daily price history. Libration stores no prices, and "
-                    "fetching at report time would break the no-network guarantee. "
-                    "Add a daily_prices table to enable this section.",
-        },
+        "benchmarks": bench,
         "ledger": ledger,
         "reconciliation": _reconciliation(db, trades, period == "lifetime", all_trades),
         "facts": facts,
         "do_not_publish": DO_NOT_PUBLISH,
+        "context_required": CONTEXT_REQUIRED,
         "disclosures": [
             "Past performance is not necessarily indicative of future results.",
             "Figures are realized round-trip results from the bot's own ledger; open "
@@ -781,8 +1143,49 @@ def render_markdown(r):
                 x["win_rate"] if x["win_rate"] is not None else "—"))
         A("\n*{}*".format(sh.get("note", "")))
 
+    cal = r["account"].get("calendar") or {}
+    if cal.get("months"):
+        A("\n## Calendar returns\n")
+        A("| Month | Return | Max drawdown in month | Days |")
+        A("|---|---:|---:|---:|")
+        for m in cal["months"]:
+            A("| {} | {:+.2f}% | {:.2f}% | {} |".format(
+                m["month"], m["return_pct"], m["max_drawdown_pct"], m["days"]))
+        A("\n*{}*".format(cal.get("note", "")))
+
+    b = r["benchmarks"]
     A("\n## Benchmarks\n")
-    A("*{}*".format(r["benchmarks"]["note"]))
+    if b.get("status") != OK:
+        A("*{}*".format(b.get("note", "")))
+    else:
+        A("*{}*\n".format(b.get("methodology", "")))
+        A("| Row | Return | Max DD | Isolates |")
+        A("|---|---:|---:|---|")
+        stg = b.get("strategy") or {}
+        A("| **Strategy (live signals)** | **{}** | **{}** | actual realized results |".format(
+            "{:+.2f}%".format(stg["return_pct"]) if stg.get("return_pct") is not None else "-",
+            "{:.2f}%".format(stg["max_dd_pct"]) if stg.get("max_dd_pct") is not None else "-"))
+        for row in b.get("rows", []):
+            rp = row.get("return_pct")
+            unit = (row.get("detail") or {}).get("unit")
+            if rp is None:
+                val = "-"
+            elif unit:
+                val = "{:+.3f}% /trade".format(rp)
+            else:
+                val = "{:+.2f}%".format(rp)
+            A("| {} - {} | {} | {} | {} |".format(
+                row["key"], _md(row["label"]), val,
+                "{:.2f}%".format(row["max_dd_pct"]) if row.get("max_dd_pct") is not None else "-",
+                _md(row.get("isolates", ""))))
+        v = b.get("timing_verdict")
+        if v:
+            A("\n> **Timing test.** {}\n".format(_md(v["statement"])))
+        for n in b.get("material_notes", []):
+            A("- {}".format(_md(n)))
+        cov = b.get("coverage") or {}
+        A("\n*Priced from {} daily closes across {} coins, {} to {}.*".format(
+            cov.get("rows"), cov.get("coins"), cov.get("first"), cov.get("last")))
 
     rec = r["reconciliation"]
     A("\n## Reconciliation\n")
@@ -993,8 +1396,58 @@ def render_html(r, marketing=False):
             A("</table>")
             A('<p class="muted">{}</p>'.format(sh.get("note", "")))
 
+        cal = r["account"].get("calendar") or {}
+        if cal.get("months"):
+            A("<h2>Calendar returns</h2>")
+            A(_svg_bars([(m["month"][5:], m["return_pct"]) for m in cal["months"]],
+                        label="monthly returns"))
+            A('<table><tr><th>Month</th><th class="n">Return</th>'
+              '<th class="n">Max DD in month</th><th class="n">Days</th></tr>')
+            for m in cal["months"]:
+                A('<tr><td>{}</td><td class="n {}">{:+.2f}%</td>'
+                  '<td class="n neg">{:.2f}%</td><td class="n">{}</td></tr>'.format(
+                      m["month"], "pos" if m["return_pct"] >= 0 else "neg",
+                      m["return_pct"], m["max_drawdown_pct"], m["days"]))
+            A("</table>")
+            A('<p class="muted">{}</p>'.format(cal.get("note", "")))
+
+        b = r["benchmarks"]
         A("<h2>Benchmarks</h2>")
-        A('<div class="note">{}</div>'.format(r["benchmarks"]["note"]))
+        if b.get("status") != OK:
+            A('<div class="note">{}</div>'.format(b.get("note", "")))
+        else:
+            A('<p class="muted">{}</p>'.format(b.get("methodology", "")))
+            A('<table><tr><th>Row</th><th class="n">Return</th>'
+              '<th class="n">Max DD</th><th>Isolates</th></tr>')
+            stg = b.get("strategy") or {}
+            A('<tr><td><b>Strategy (live signals)</b></td><td class="n"><b>{}</b></td>'
+              '<td class="n">{}</td><td class="basis">actual realized results</td></tr>'.format(
+                  "{:+.2f}%".format(stg["return_pct"]) if stg.get("return_pct") is not None else "—",
+                  "{:.2f}%".format(stg["max_dd_pct"]) if stg.get("max_dd_pct") is not None else "—"))
+            for row in b.get("rows", []):
+                rp = row.get("return_pct")
+                unit = (row.get("detail") or {}).get("unit")
+                if rp is None:
+                    val = "—"
+                elif unit:
+                    val = "{:+.3f}% /trade".format(rp)
+                else:
+                    val = "{:+.2f}%".format(rp)
+                A('<tr><td>{} · {}</td><td class="n">{}</td><td class="n">{}</td>'
+                  '<td class="basis">{}</td></tr>'.format(
+                      row["key"], row["label"], val,
+                      "{:.2f}%".format(row["max_dd_pct"])
+                      if row.get("max_dd_pct") is not None else "—",
+                      row.get("isolates", "")))
+            A("</table>")
+            v = b.get("timing_verdict")
+            if v:
+                A('<div class="note"><b>Timing test.</b> {}</div>'.format(v["statement"]))
+            for n in b.get("material_notes", []):
+                A('<p class="muted">{}</p>'.format(n))
+            cov = b.get("coverage") or {}
+            A('<p class="muted">Priced from {} daily closes across {} coins, {} to {}.</p>'
+              .format(cov.get("rows"), cov.get("coins"), cov.get("first"), cov.get("last")))
 
         rec = r["reconciliation"]
         A("<h2>Reconciliation</h2>")
@@ -1015,6 +1468,11 @@ def render_html(r, marketing=False):
             allf.update(r[s].get("figures", {}))
         ftable([x for x in allf.values() if x["publishable"]], show_unpub=False)
 
+    if r.get("context_required"):
+        A("<h2>Quote only with context</h2><ul>")
+        for kk, why in r["context_required"].items():
+            A("<li><b>{}</b> — {}</li>".format(kk, why))
+        A("</ul>")
     A("<h2>Do not publish</h2><ul>")
     for kk, why in r["do_not_publish"].items():
         A("<li><b>{}</b> — {}</li>".format(kk, why))

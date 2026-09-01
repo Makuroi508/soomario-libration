@@ -5,6 +5,7 @@ SQLite is the operational source of truth the bot reads/writes each tick:
   account     — single row: equity, daily baseline, daily-DD halt flag
   positions   — one open position per coin (pyramiding 1)
   trades      — closed trades (live KPI + dashboard stats)
+  daily_prices— one UTC daily close per coin, for report benchmarks
   misses      — missed signals + reason (fill-rate KPI)
   rsi_state   — last closed 4h ts + last RSI per coin (double-fire guard)
 
@@ -16,6 +17,7 @@ were not looking (the Farms orphan-position lesson).
 """
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Optional
 
 from config import DB_PATH, EQUITY_LOG, TRADE_LOG
@@ -48,6 +50,10 @@ CREATE TABLE IF NOT EXISTS rsi_state (
 CREATE TABLE IF NOT EXISTS shadow_state (
   id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, trail_pct REAL, side TEXT,
   entry REAL, qty REAL, peak REAL, active INTEGER DEFAULT 0, hard_stop REAL, opened_at TEXT
+);
+CREATE TABLE IF NOT EXISTS daily_prices (
+  coin TEXT, d TEXT, close REAL,
+  PRIMARY KEY (coin, d)
 );
 CREATE TABLE IF NOT EXISTS shadow_trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, side TEXT, trail_pct REAL,
@@ -241,6 +247,59 @@ class DB:
         if removed:
             self._conn.commit()
         return removed
+
+    # ── daily prices (report benchmarks) ───────────────────────
+    def record_daily_closes(self, coin: str, candles: list) -> int:
+        """Persist one UTC daily close per coin from the 4h candles already pulled
+        for RSI. Free: no extra network. The LAST 4h bar of each UTC day is that
+        day's close; the most recent day is deliberately re-written on every pass
+        because it is still forming until 20:00 UTC.
+
+        Exists so /api/report can compute benchmarks without fetching at report
+        time — a report that hits the network could stall the trading worker.
+        """
+        if not candles:
+            return 0
+        by_day = {}
+        for c in candles:
+            t = c.get("t")
+            close = c.get("c")
+            if t is None or close is None:
+                continue
+            day = datetime.fromtimestamp(int(t) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            prev = by_day.get(day)
+            if prev is None or int(t) >= prev[0]:
+                by_day[day] = (int(t), float(close))
+        rows = [(coin.upper(), d, v[1]) for d, v in by_day.items()]
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO daily_prices(coin, d, close) VALUES (?,?,?) "
+                "ON CONFLICT(coin, d) DO UPDATE SET close=excluded.close", rows)
+            self._conn.commit()
+        return len(rows)
+
+    def price_series(self, coins=None, start=None, end=None) -> dict:
+        """{COIN: {"YYYY-MM-DD": close}} for the requested coins and window."""
+        q = "SELECT coin, d, close FROM daily_prices WHERE 1=1"
+        args = []
+        if coins:
+            q += " AND coin IN (%s)" % ",".join("?" * len(coins))
+            args += [c.upper() for c in coins]
+        if start:
+            q += " AND d >= ?"; args.append(start)
+        if end:
+            q += " AND d <= ?"; args.append(end)
+        out = {}
+        for coin, d, close in self._conn.execute(q + " ORDER BY coin, d", args):
+            out.setdefault(coin, {})[d] = close
+        return out
+
+    def price_coverage(self) -> dict:
+        """What the benchmark section can actually stand on."""
+        row = self._conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT coin), MIN(d), MAX(d) FROM daily_prices"
+        ).fetchone()
+        return {"rows": row[0], "coins": row[1], "first": row[2], "last": row[3]}
 
     def measured_friction(self):
         """Mean realized round-trip friction % across trades that have it (live
