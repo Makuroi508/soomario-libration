@@ -6,6 +6,7 @@ Soomario Libration — API routes
   GET /api/status       — live snapshot (reads status.json the worker writes)
   GET /api/positions    — open positions w/ live mark + uPnL
   GET /api/trades       — recent closed trades (?n=50)
+  GET /api/report       — financial report (?period=&format=json|md|html|zip)
   GET /api/equity       — equity curve + event markers (?tf=1d|1w|1m|all)  [SPEC v1.2]
   GET /api/stats        — KPIs: win rate, avg net %, fill rate, realized PnL
 
@@ -17,11 +18,13 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 import config
 from config import BASE_DIR, EQUITY_LOG, TRADE_LOG, STATUS_FILE, summary as config_summary
 from utils import tail_jsonl, load_json, iso, next_utc_reset, now_utc
+
+import report as report_mod
 
 logger = logging.getLogger("api")
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
@@ -248,6 +251,63 @@ def api_shadow():
         "note": "Decide the trail only after ~50 matched trades; shadow exits are "
                 "charged measured friction for fairness (spec §7b).",
     })
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Financial report — see report.py for the metric definitions
+# ═══════════════════════════════════════════════════════════════
+@app.route("/api/report")
+def api_report():
+    """Financial report bundle.
+
+      ?period = lifetime | ytd | 90d | 30d | 7d      (default lifetime)
+      ?format = json | md | html | marketing | marketing_html | zip
+
+    Read-only: builds from the SQLite trade ledger with no network calls, so it
+    cannot perturb the trading worker sharing this process. Gated on
+    REPORT_TOKEN when that is set — the payload is full account financials.
+    """
+    want = (config.REPORT_TOKEN or "").strip()
+    if want:
+        got = (request.args.get("token") or
+               request.headers.get("X-Report-Token") or "").strip()
+        if got != want:
+            return jsonify({"error": "unauthorized"}), 401
+
+    period = (request.args.get("period") or "lifetime").lower()
+    if period not in report_mod.PERIODS:
+        return jsonify({"error": "bad period",
+                        "allowed": sorted(report_mod.PERIODS)}), 400
+    fmt = (request.args.get("format") or "json").lower()
+
+    try:
+        st = load_json(STATUS_FILE, default={}) or {}
+        rep = report_mod.build(_db(), period=period, status=st)
+    except Exception as e:                                    # noqa: BLE001
+        logger.exception("report build failed")
+        return jsonify({"error": "report build failed", "detail": str(e)}), 500
+
+    stamp = rep["provenance"]["window_end"][:10]
+    name = f"libration_report_{period}_{stamp}"
+    if fmt == "json":
+        return jsonify(rep)
+    if fmt == "md":
+        return Response(report_mod.render_markdown(rep),
+                        mimetype="text/markdown; charset=utf-8")
+    if fmt == "html":
+        return Response(report_mod.render_html(rep), mimetype="text/html; charset=utf-8")
+    if fmt == "marketing":
+        return Response(report_mod.render_marketing_markdown(rep),
+                        mimetype="text/markdown; charset=utf-8")
+    if fmt == "marketing_html":
+        return Response(report_mod.render_html(rep, marketing=True),
+                        mimetype="text/html; charset=utf-8")
+    if fmt == "zip":
+        return Response(report_mod.bundle_zip(rep), mimetype="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
+    return jsonify({"error": "bad format",
+                    "allowed": ["json", "md", "html", "marketing",
+                                "marketing_html", "zip"]}), 400
 
 
 # ═══════════════════════════════════════════════════════════════

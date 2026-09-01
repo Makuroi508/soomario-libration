@@ -477,6 +477,13 @@ def tick(hl, db, pm, em, shadow):
                 continue
             candles = hl.fetch_candles(coin, config.RSI_TF, config.CANDLE_LIMIT)
             closed = signals.closed_candles(candles, now_ms)
+            # Persist daily closes for the report benchmarks while the candles are
+            # already in hand — no extra network, and the 200-bar pull backfills
+            # ~33 days on the first pass after deploy.
+            try:
+                db.record_daily_closes(coin, closed)
+            except Exception as e:                      # noqa: BLE001
+                logger.debug(f"daily price capture failed for {coin}: {e}")
             if len(closed) < config.RSI_LEN + 2:
                 continue
             last_ts = closed[-1]["t"]
