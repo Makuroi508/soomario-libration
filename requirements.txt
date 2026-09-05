@@ -6,9 +6,8 @@ eth-account>=0.13.0
 # Solana venues (Pacifica / Bulk)
 base58>=2.1
 solders>=0.21
-# PINNED: 0.1.20+ made Signer(signature_domain) a required argument and
-# breaks bulk_client (written and tested against 0.1.19). BULK mainnet has
-# not started; when it does, upgrade deliberately and pass the correct
-# signature_domain rather than letting the floor float onto an API break.
-bulk-keychain==0.1.19
+# >=0.1.26: BULK mainnet (API v1.0.19). bulk_client passes the signature
+# domain explicitly (BULK_NETWORK) and uses prepare_order/sign_prepared for
+# agent-wallet signing; both need 0.1.26+. Linux cp313 wheels exist.
+bulk-keychain>=0.1.26
 pynacl>=1.5

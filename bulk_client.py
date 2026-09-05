@@ -1,38 +1,41 @@
 """
-Soomario Libration - Bulk Trade client (Solana execution layer, TESTNET/paper)
-==============================================================================
+Soomario Libration - Bulk Trade client (Solana perps, MAINNET)
+==============================================================
 Implements the SAME client contract Libration's strategy layer expects from
 hl_client.HLClient, so PositionManager / ExitManager / the tick loop drive it
 unchanged. Bulk is a Solana-native perps venue; auth is Ed25519 over a canonical
-wincode binary message handled entirely by the official `bulk-keychain` Python
-library (Keypair/Signer) - we never hand-roll the binary encoding.
+wincode preimage (action count + actions + nonce + ACCOUNT pubkey + network
+domain byte) handled entirely by the official `bulk-keychain` library - we never
+hand-roll the binary encoding.
 
-Signed actions go to a single unified endpoint (POST /order) as
-{actions, nonce, account, signer, signature}. `signer.sign(order)` returns
-exactly that envelope plus the deterministic `order_id`.
+Updated for Bulk API v1.0.19 (mainnet, 2 Sep 2026):
+  * REST base  : https://mainnet-api1.bulk.trade/api/v1  (signature domain "mainnet")
+  * /account   : POST {type: fullAccount, user} -> [{ "fullAccount": {...} }]
+                 margin.totalMargin / availableMargin, positions[].size (signed),
+                 positions[].price (entry). A read that does not yield a fullAccount
+                 object is a FAILED read (None), never a trusted-empty [].
+  * prices     : no all-symbol ticker on Bulk; GET /ticker/{symbol} per coin
+                 (markPrice) with a short TTL cache, HL marks as fallback.
+  * stops      : mainnet lists STOP order types -> NATIVE protective stops
+                 ({type:"stop"}), moved by cancel-then-replace. If native placement
+                 fails the software backstop (exit_manager) still covers the exit.
 
-Compact order encodings produced by the lib (verified):
-  market : {'m': {'b':<is_buy>, 'c':'SOL-USD', 'i':False, 'r':<reduce_only>, 'sz':<size>}}
-  cancel : {'cx':{'c':'SOL-USD', 'oid':<base58>}}
-
-STOPS: Bulk testnet exposes only LIMIT/MARKET (per exchangeInfo), so this venue
-runs BACKSTOP-ONLY: place_stop_market / modify_stop are no-ops that return a
-non-numeric sentinel id, and the software backstop in exit_manager carries every
-hard-stop and trailing exit (a posture the handoff already documents as
-known-good on the shared vault). No native trigger signing is needed.
-
-MARKS: get_all_prices reads Bulk's own price feed, but also accepts an injected
-price_fallback (wired by the fan-out app to Hyperliquid marks) so sizing and
-trailing never stall if the testnet feed path needs tuning.
+AGENT MODE (recommended - keeps the master wallet's key off the server):
+  Bulk supports signer != account when the signer is an authorized agent wallet.
+  `bulk_keychain.prepare_order(order, domain, account=MASTER, signer=AGENT)` builds
+  the preimage with the MASTER pubkey; the agent Signer signs it. Authorize the
+  agent ONCE from the master key with bulk_authorize_agent.py (run locally).
 
 Env (set on Railway; never in code):
-  BULK_REST_URL        default https://staging-api.bulk.trade/api/v1  (testnet)
-  BULK_ACCOUNT_ADDRESS Solana account pubkey (faucet-funded on testnet)
-  BULK_PRIVATE_KEY     base58 secret of the signer for that account
-  BULK_ORDER_PATH      default /order
-  BULK_ACCOUNT_PATH    default /account
-  BULK_PRICE_PATH      default /ticker   (all-symbol price feed; verified at boot)
-  BULK_KLINES_PATH     default /klines
+  BULK_NETWORK          "mainnet" (default) | "testnet"  -> REST default + sig domain
+  BULK_REST_URL         override REST base (default per BULK_NETWORK)
+  BULK_ACCOUNT_ADDRESS  trading account pubkey. In agent mode: the MASTER wallet.
+  BULK_PRIVATE_KEY      base58 secret of the SIGNER (agent key in agent mode)
+  BULK_AGENT            "1" if BULK_PRIVATE_KEY is an authorized agent wallet key
+  BULK_NATIVE_STOPS     "1" (default) use native stop orders; "0" backstop-only
+  BULK_STOP_FAIL_MODE   "backstop" (default: keep position, software backstop) |
+                        "flatten" (close immediately if native stop can't be placed)
+  BULK_ORDER_PATH / BULK_ACCOUNT_PATH / BULK_PRICE_PATH / BULK_KLINES_PATH  overrides
 """
 import logging
 import math
@@ -53,29 +56,29 @@ RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 BASE_BACKOFF_SEC = 1.5
 HTTP_TIMEOUT = 10
+PRICE_TTL_SEC = 8.0          # dedupe per-symbol ticker reads within a tick
 
-# Sentinel returned by place_stop_market so the position is KEPT (not flattened)
-# while the software backstop owns the exit. Non-numeric on purpose: exit_manager
-# only attempts cancel_order when str(id).isdigit(), so this is never cancelled.
+DEFAULT_REST = {
+    "mainnet": "https://mainnet-api1.bulk.trade/api/v1",
+    "testnet": "https://exchange-api.bulk.trade/api/v1",
+    "devnet":  "https://staging-api.bulk.trade/api/v1",
+}
+
+# Sentinel returned by place_stop_market when the position is KEPT (not
+# flattened) while the software backstop owns the exit. Non-numeric on purpose:
+# exit_manager only attempts cancel_order when str(id).isdigit().
 BACKSTOP_SENTINEL = "backstop"
 
 
 def _short(symbol: str) -> str:
     s = str(symbol).split(":", 1)[-1].upper()
-    return s.split("-", 1)[0] if s.endswith("-USD") or "-USD" in s else s
+    return s.split("-", 1)[0] if "-USD" in s else s
 
 
 def bulk_symbol(internal: str) -> str:
     """Internal uppercase ticker -> Bulk 'TICKER-USD' symbol."""
     u = str(internal).split(":", 1)[-1].upper().split("-", 1)[0]
     return f"{u}-USD"
-
-
-def _decimals_from_step(step: float) -> int:
-    if step is None or step <= 0:
-        return 6
-    d = -int(math.floor(math.log10(step) + 1e-9))
-    return max(0, min(d, 12))
 
 
 def _f(v, default=None):
@@ -85,21 +88,48 @@ def _f(v, default=None):
         return default
 
 
+def _find_key(obj, keys, _depth=0):
+    """Depth-first search for the first of `keys` in nested dict/list JSON."""
+    if _depth > 6:
+        return None
+    if isinstance(obj, dict):
+        for k in keys:
+            if k in obj and obj[k] not in (None, ""):
+                return obj[k]
+        for v in obj.values():
+            r = _find_key(v, keys, _depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_key(v, keys, _depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
 class BulkClient:
     def __init__(self):
-        self.rest_url = os.getenv("BULK_REST_URL",
-                                  "https://staging-api.bulk.trade/api/v1").rstrip("/")
+        self.network = (os.getenv("BULK_NETWORK", "mainnet") or "mainnet").strip().lower()
+        self.rest_url = (os.getenv("BULK_REST_URL") or DEFAULT_REST.get(self.network, DEFAULT_REST["mainnet"])).rstrip("/")
         self.account_address = (os.getenv("BULK_ACCOUNT_ADDRESS") or "").strip()
         self._priv = (os.getenv("BULK_PRIVATE_KEY") or "").strip()
+        self.is_agent = os.getenv("BULK_AGENT", "0") == "1"
+        self.native_stops = os.getenv("BULK_NATIVE_STOPS", "1") == "1"
+        self.stop_fail_mode = (os.getenv("BULK_STOP_FAIL_MODE", "backstop") or "backstop").lower()
         self.order_path = os.getenv("BULK_ORDER_PATH", "/order")
         self.account_path = os.getenv("BULK_ACCOUNT_PATH", "/account")
-        self.price_path = os.getenv("BULK_PRICE_PATH", "/ticker")
+        self.price_path = os.getenv("BULK_PRICE_PATH", "/ticker")     # + /{SYMBOL-USD}
         self.klines_path = os.getenv("BULK_KLINES_PATH", "/klines")
 
         self._signer = None
-        self.asset_meta = {}       # {SYMBOL: {lot, tick, min_notional}}
+        self._signer_pub = None
+        self._prepare_order = None       # bulk_keychain.prepare_order (agent-capable)
+        self.asset_meta = {}             # {SYMBOL: {symbol, lot, tick, min_notional, native_stop}}
         self.last_open_error = None
-        self.price_fallback: Optional[Callable] = None  # e.g. HL get_all_prices
+        self.price_fallback: Optional[Callable] = None   # e.g. HL get_all_prices
+        self._px_cache = {}              # SYMBOL -> (ts, px)
+        self._stop_ids = {}              # SYMBOL -> resting native stop order id
         self._sess = requests.Session()
 
     # ---- lifecycle -------------------------------------------------
@@ -109,6 +139,7 @@ class BulkClient:
 
     def init_sdk(self) -> bool:
         try:
+            import bulk_keychain as bk
             from bulk_keychain import Keypair, Signer
         except Exception as e:
             logger.error(f"bulk_keychain import failed: {e}")
@@ -118,19 +149,43 @@ class BulkClient:
             return False
         try:
             kp = Keypair.from_base58(self._priv)
-            # bulk-keychain is PINNED to 0.1.19 in requirements: 0.1.20+
-            # requires Signer(kp, signature_domain=...) and the right domain
-            # value is a BULK-mainnet decision, not a guess. Revisit at launch.
-            self._signer = Signer(kp)
-            signer_pub = kp.pubkey if isinstance(kp.pubkey, str) else str(kp.pubkey)
+            self._signer_pub = kp.pubkey if isinstance(kp.pubkey, str) else str(kp.pubkey)
         except Exception as e:
             logger.error(f"bad BULK_PRIVATE_KEY: {e}")
             return False
-        if self.account_address and self.account_address != signer_pub:
-            logger.warning(f"BULK_ACCOUNT_ADDRESS {self.account_address} != key pubkey "
-                           f"{signer_pub}; using key pubkey (account==signer)")
-        self.account_address = signer_pub
-        logger.info(f"Bulk signer ready: account {self.account_address}")
+        # signature domain string: accept "mainnet" / "Mainnet" spellings
+        last = None
+        for dom in (self.network, self.network.capitalize(), self.network.upper()):
+            try:
+                self._signer = Signer(kp, dom)
+                self.network = dom
+                break
+            except Exception as e:
+                last = e
+        if self._signer is None:
+            logger.error(f"bulk_keychain rejected signature domain '{self.network}': {last}")
+            return False
+        self._prepare_order = getattr(bk, "prepare_order", None)
+
+        if self.is_agent:
+            if not self.account_address:
+                logger.error("BULK_AGENT=1 requires BULK_ACCOUNT_ADDRESS (the master wallet)")
+                return False
+            if self._prepare_order is None:
+                logger.error("bulk-keychain too old for agent signing (need prepare_order; "
+                             "pin bulk-keychain>=0.1.26)")
+                return False
+            if self.account_address == self._signer_pub:
+                logger.warning("BULK_AGENT=1 but the key IS the master account; agent mode is moot")
+        else:
+            if self.account_address and self.account_address != self._signer_pub:
+                logger.warning(f"BULK_ACCOUNT_ADDRESS {self.account_address} != key pubkey "
+                               f"{self._signer_pub}; using key pubkey (account==signer). "
+                               f"Set BULK_AGENT=1 if this key is an agent wallet.")
+            self.account_address = self._signer_pub
+        logger.info(f"Bulk signer ready [{self.network}]: account {self.account_address}"
+                    f"{' (agent ' + self._signer_pub + ')' if self.is_agent else ''}")
+
         if not self._load_market_meta():
             logger.error("Bulk exchangeInfo load failed - refusing to start")
             return False
@@ -147,16 +202,21 @@ class BulkClient:
             if not sym:
                 continue
             base = sym.split("-", 1)[0]
+            types = {str(t).upper() for t in (m.get("orderTypes") or [])}
             meta[base] = {
                 "symbol": sym,
                 "lot": _f(m.get("lotSize") or m.get("lot_size"), 0.0) or 0.0,
                 "tick": _f(m.get("tickSize") or m.get("tick_size"), 0.0) or 0.0,
                 "min_notional": _f(m.get("minNotional") or m.get("min_notional"), 10.0) or 10.0,
+                "max_leverage": _f(m.get("maxLeverage"), 0.0) or 0.0,
+                "native_stop": ("STOP" in types) if types else False,
             }
         if not meta:
             return False
         self.asset_meta = meta
-        logger.info(f"Bulk market meta loaded for {len(meta)} symbols")
+        n_native = sum(1 for v in meta.values() if v["native_stop"])
+        logger.info(f"Bulk market meta loaded for {len(meta)} symbols "
+                    f"({n_native} with native STOP; native_stops={'on' if self.native_stops else 'off'})")
         return True
 
     def lists(self, internal: str) -> bool:
@@ -164,17 +224,17 @@ class BulkClient:
 
     def signing_works(self) -> bool:
         try:
-            self._signer.sign({"type": "order", "symbol": "SOL-USD", "is_buy": True,
-                               "price": 0, "size": 0.0,
-                               "order_type": {"type": "market", "is_market": True}})
+            self._sign({"type": "order", "symbol": "SOL-USD", "is_buy": True,
+                        "price": 0, "size": 0.0, "reduce_only": False,
+                        "order_type": {"type": "market", "is_market": True}})
             return True
         except Exception:
             return False
 
     # ---- HTTP ------------------------------------------------------
-    def _get(self, path: str, params: Optional[dict] = None):
+    def _get(self, path: str, params: Optional[dict] = None, retries: int = MAX_RETRIES):
         url = self.rest_url + path
-        for attempt in range(1, MAX_RETRIES + 1):
+        for attempt in range(1, retries + 1):
             try:
                 r = self._sess.get(url, params=params, timeout=HTTP_TIMEOUT)
                 if r.status_code in RETRYABLE_STATUS:
@@ -182,7 +242,7 @@ class BulkClient:
                 r.raise_for_status()
                 return r.json()
             except Exception as e:
-                if attempt == MAX_RETRIES:
+                if attempt == retries:
                     logger.warning(f"GET {path} failed after {attempt}: {e}")
                     return None
                 time.sleep(BASE_BACKOFF_SEC * attempt)
@@ -196,7 +256,10 @@ class BulkClient:
                                     headers={"Content-Type": "application/json"})
                 if r.status_code in RETRYABLE_STATUS:
                     raise requests.HTTPError(str(r.status_code))
-                return r.json()
+                try:
+                    return r.json()
+                except ValueError:
+                    return {"error": f"non-json response HTTP {r.status_code}", "http": r.status_code}
             except Exception as e:
                 if attempt == MAX_RETRIES:
                     logger.error(f"POST {path} failed after {attempt}: {e}")
@@ -204,99 +267,166 @@ class BulkClient:
                 time.sleep(BASE_BACKOFF_SEC * attempt)
         return None
 
+    # ---- signing ---------------------------------------------------
+    def _sign(self, order: dict) -> dict:
+        """Sign one action dict. Agent mode: preimage carries the MASTER account
+        pubkey (bulk-keychain prepare_order) and the agent key signs it."""
+        if self._prepare_order is not None:
+            prepared = self._prepare_order(order, self.network, self.account_address,
+                                           signer=self._signer_pub, nonce=None)
+            return self._signer.sign_prepared(prepared)
+        if self.is_agent:
+            raise RuntimeError("agent signing requires bulk_keychain.prepare_order")
+        return self._signer.sign(order)
+
     def _submit_signed(self, order: dict):
-        """Sign a single action dict with bulk-keychain and POST it. Returns the
-        API response (dict) or None. Honors DRY_RUN."""
+        """Sign a single action dict and POST it. Returns (response, signed)
+        where response is the API dict or None. Honors DRY_RUN."""
         try:
-            signed = self._signer.sign(order)
+            signed = self._sign(order)
         except Exception as e:
             logger.error(f"bulk sign failed: {e}")
-            return None
-        # `actions` comes back as a JSON string; the API expects the parsed array.
+            return None, None
         actions = signed.get("actions")
-        if isinstance(actions, str):
+        if isinstance(actions, str):            # older libs returned JSON text
             import json as _json
             try:
-                actions = _json.loads(actions.replace("'", '"'))
+                actions = _json.loads(actions)
             except Exception:
                 pass
         body = {
             "actions": actions,
             "nonce": signed.get("nonce"),
-            "account": self.account_address,
-            "signer": signed.get("signer"),
+            "account": signed.get("account") or self.account_address,
+            "signer": signed.get("signer") or self._signer_pub,
             "signature": signed.get("signature"),
         }
         if DRY_RUN:
             logger.info(f"[DRY] would POST {self.order_path} {order.get('type')} {order.get('symbol')}")
-            return {"success": True, "dry": True, "order_id": signed.get("order_id")}
+            return {"status": "ok", "dry": True, "order_id": signed.get("order_id")}, signed
         res = self._post(self.order_path, body)
-        if isinstance(res, dict):
+        if isinstance(res, dict) and signed.get("order_id"):
             res.setdefault("order_id", signed.get("order_id"))
-        return res
+        return res, signed
+
+    @staticmethod
+    def _ok(res) -> bool:
+        if res is None:
+            return False
+        if isinstance(res, dict):
+            if res.get("success") is False or res.get("error") or res.get("errors"):
+                return False
+            st = str(res.get("status", "")).lower()
+            if st in ("error", "rejected", "failed"):
+                return False
+            # per-action rejection inside statuses[]
+            for s in res.get("statuses") or []:
+                if isinstance(s, dict) and (s.get("error") or "error" in s):
+                    return False
+        return True
+
+    @staticmethod
+    def _oid(res, signed=None) -> Optional[str]:
+        if signed and signed.get("order_id"):
+            return str(signed["order_id"])
+        v = _find_key(res, ("oid", "order_id", "orderId")) if res is not None else None
+        return str(v) if v else None
 
     # ---- prices ----------------------------------------------------
+    def _ticker_price(self, internal: str) -> Optional[float]:
+        sym = _short(internal)
+        now = time.time()
+        hit = self._px_cache.get(sym)
+        if hit and now - hit[0] < PRICE_TTL_SEC:
+            return hit[1]
+        data = self._get(f"{self.price_path}/{bulk_symbol(sym)}", retries=1)
+        px = None
+        if isinstance(data, dict):
+            px = _f(data.get("markPrice") or data.get("lastPrice") or data.get("oraclePrice")
+                    or data.get("mark") or data.get("price"))
+        if px is not None and px > 0:
+            self._px_cache[sym] = (now, px)
+            return px
+        return None
+
     def get_all_prices(self, extra=None) -> dict:
+        """Marks for the requested coins (`extra`, i.e. this venue's universe +
+        open positions) from Bulk's per-symbol ticker; anything missing is
+        filled from the injected fallback (HL marks)."""
+        want = [_short(c) for c in (extra or []) if c]
         out = {}
-        data = self._get(self.price_path)
-        rows = data if isinstance(data, list) else (data.get("data", []) if isinstance(data, dict) else [])
-        for row in rows or []:
-            sym = _short(row.get("symbol", row.get("s", "")))
-            px = row.get("markPrice") or row.get("mark") or row.get("price") \
-                or row.get("last") or row.get("px")
-            v = _f(px)
-            if sym and v is not None and v > 0:
-                out[sym] = v
-        if not out and self.price_fallback:
+        for sym in want:
+            if sym not in self.asset_meta:
+                continue
+            px = self._ticker_price(sym)
+            if px:
+                out[sym] = px
+        if self.price_fallback and (not want or len(out) < len(want)):
             try:
                 fb = self.price_fallback(extra) or {}
-                out = {_short(k): float(v) for k, v in fb.items()}
+                for k, v in fb.items():
+                    k = _short(k)
+                    if k not in out and v:
+                        out[k] = float(v)
             except Exception as e:
                 logger.warning(f"bulk price fallback failed: {e}")
         return out
 
     def get_price(self, symbol: str) -> Optional[float]:
-        return self.get_all_prices().get(_short(symbol))
+        px = self._ticker_price(symbol)
+        if px:
+            return px
+        if self.price_fallback:
+            try:
+                return (self.price_fallback([symbol]) or {}).get(_short(symbol))
+            except Exception:
+                return None
+        return None
 
     # ---- account (positions + equity via unsigned fullAccount) -----
-    def _full_account(self):
-        return self._post(self.account_path,
-                          {"type": "fullAccount", "user": self.account_address})
+    def _full_account(self) -> Optional[dict]:
+        """Return the fullAccount object, or None on ANY failed/unrecognized
+        read. Callers must treat None as 'unknown', never as 'empty'."""
+        if not self.account_address:
+            return None
+        acct = self._post(self.account_path, {"type": "fullAccount", "user": self.account_address})
+        if acct is None:
+            return None
+        # documented: [{ "fullAccount": {...} }]; tolerate {data: ...} / bare object
+        node = acct
+        for _ in range(3):
+            if isinstance(node, list):
+                node = next((x for x in node if isinstance(x, dict)), None)
+            if isinstance(node, dict):
+                if "fullAccount" in node:
+                    node = node["fullAccount"]; continue
+                if "data" in node and isinstance(node["data"], (dict, list)):
+                    node = node["data"]; continue
+            break
+        if isinstance(node, dict) and ("margin" in node or "positions" in node):
+            return node
+        logger.warning(f"fullAccount: unrecognized response shape ({str(acct)[:160]})")
+        return None
 
     def get_positions(self):
         """None on FAILED read, [] on confirmed-empty. Normalizes to
         {coin, szi (+long/-short), entryPx}."""
-        if not self.account_address:
+        fa = self._full_account()
+        if fa is None:
             return None
-        acct = self._full_account()
-        if acct is None:
-            return None
-        data = acct.get("data", acct) if isinstance(acct, dict) else acct
-        positions = None
-        if isinstance(data, dict):
-            for k in ("positions", "perpPositions", "openPositions", "assetPositions"):
-                if isinstance(data.get(k), list):
-                    positions = data[k]; break
-        if positions is None:
-            # a confirmed response with no positions field -> treat as empty
-            return []
         out = []
-        for p in positions:
-            pos = p.get("position", p) if isinstance(p, dict) else {}
-            sym = _short(pos.get("symbol", pos.get("coin", pos.get("c", ""))))
+        for p in fa.get("positions") or []:
+            if not isinstance(p, dict):
+                continue
+            sym = _short(p.get("symbol", p.get("coin", "")))
             if not sym:
                 continue
-            szi = pos.get("szi")
-            if szi is None:
-                size = _f(pos.get("size", pos.get("sz")), 0.0) or 0.0
-                side = str(pos.get("side", pos.get("b", ""))).lower()
-                is_long = side in ("long", "buy", "bid", "true", "1") or pos.get("b") is True
-                szi = abs(size) if is_long else -abs(size)
-            szi = _f(szi, 0.0) or 0.0
+            szi = _f(p.get("size", p.get("szi", p.get("sz"))), 0.0) or 0.0
             if szi == 0:
                 continue
-            entry = _f(pos.get("entryPx", pos.get("entryPrice", pos.get("avgPrice", pos.get("px")))), 0.0)
-            out.append({"coin": sym, "szi": szi, "entryPx": entry, "symbol": sym})
+            entry = _f(p.get("price", p.get("entryPx", p.get("entryPrice", p.get("avgPrice")))), 0.0) or 0.0
+            out.append({"coin": sym, "szi": szi, "entryPx": entry, "symbol": sym,
+                        "mark": _f(p.get("fairPrice")), "iso": bool(p.get("iso"))})
         return out
 
     def get_position(self, symbol: str) -> Optional[dict]:
@@ -310,50 +440,23 @@ class BulkClient:
         return None
 
     def get_equity(self) -> float:
-        acct = self._full_account()
-        if not acct:
+        fa = self._full_account()
+        if not fa:
             return 0.0
-        data = acct.get("data", acct) if isinstance(acct, dict) else acct
-        ms = data.get("marginSummary", {}) if isinstance(data, dict) else {}
-        for src in (data, ms):
-            if not isinstance(src, dict):
-                continue
-            for k in ("equity", "accountValue", "totalEquity", "accountEquity", "balance"):
-                v = _f(src.get(k))
-                if v is not None:
-                    return v
+        m = fa.get("margin") or {}
+        for k in ("totalMargin", "totalBalance", "accountValue", "equity", "totalEquity"):
+            v = _f(m.get(k))
+            if v is not None:
+                return v
         return 0.0
 
     def get_user_fills(self, start_ms: Optional[int] = None) -> list:
-        """Best-effort fills for reconcile. If the path/shape is not yet
-        confirmed this returns [], and reconcile safely books at the stop
-        estimate after debounce rather than fabricating."""
-        acct = self._full_account()
-        if not acct:
-            return []
-        data = acct.get("data", acct) if isinstance(acct, dict) else acct
-        fills = data.get("fills", data.get("trades", [])) if isinstance(data, dict) else []
-        out = []
-        for f in fills or []:
-            sym = _short(f.get("symbol", f.get("coin", f.get("c", ""))))
-            d = str(f.get("dir", f.get("direction", ""))).strip()
-            if not d:
-                side = str(f.get("side", "")).lower()
-                closing = str(f.get("reduceOnly", f.get("r", ""))).lower() in ("true", "1")
-                d = ("Close " + ("Long" if side in ("sell", "ask") else "Short")) if closing else side
-            px = _f(f.get("px", f.get("price")), 0.0)
-            sz = _f(f.get("sz", f.get("size")), 0.0)
-            if px is None or sz is None:
-                continue
-            out.append({"coin": sym, "px": px, "sz": sz, "dir": d,
-                        "fee": _f(f.get("fee"), 0.0) or 0.0,
-                        "time": f.get("time") or f.get("ts")})
-        return out
+        """fullAccount carries no fill history; reconcile books at the stop
+        estimate after its debounce rather than fabricating."""
+        return []
 
-    # ---- leverage (best-effort; 2x is under every Bulk symbol cap) --
+    # ---- leverage (2x is under every Bulk symbol cap) --------------
     def set_leverage(self, symbol: str, leverage: int) -> bool:
-        # Bulk sets per-symbol max leverage via updateUserSettings; at 2x we are
-        # far under every listed cap, so this is a no-op success on testnet.
         return True
 
     # ---- rounding --------------------------------------------------
@@ -363,8 +466,14 @@ class BulkClient:
     def _round_size(self, internal: str, size: float) -> float:
         lot = self._meta(internal).get("lot") or 0.0
         if lot > 0:
-            return math.floor(size / lot + 1e-9) * lot
-        return round(size, 6)
+            size = math.floor(size / lot + 1e-9) * lot
+        return round(size, 8)
+
+    def _round_px(self, internal: str, px: float) -> float:
+        tick = self._meta(internal).get("tick") or 0.0
+        if tick > 0:
+            px = round(px / tick) * tick
+        return round(px, 8)
 
     # ---- market open / close ---------------------------------------
     def market_open(self, symbol: str, is_buy: bool, notional_usd: float,
@@ -386,16 +495,16 @@ class BulkClient:
                                     f"(notional ${size*current_price:.2f})")
             return None
         order = {"type": "order", "symbol": sym, "is_buy": bool(is_buy),
-                 "price": 0, "size": size, "reduce_only": False,
+                 "price": 0, "size": size, "reduce_only": False, "iso": False,
                  "order_type": {"type": "market", "is_market": True}}
         logger.info(f"    -> market_open {'BUY' if is_buy else 'SELL'} {size} {sym} "
                     f"(ref ${current_price:.4f}, notional ${size*current_price:.2f})")
-        res = self._submit_signed(order)
-        if res is None or (isinstance(res, dict) and res.get("success") is False):
+        res, signed = self._submit_signed(order)
+        if not self._ok(res):
             self.last_open_error = self._err(res) or "not_filled"
             return None
         return {"filled": True, "avg_price": current_price, "total_size": size,
-                "status": "filled", "oid": res.get("order_id") if isinstance(res, dict) else None}
+                "status": "filled", "oid": self._oid(res, signed)}
 
     def market_close(self, symbol: str, size: float, is_long: bool,
                      current_price: Optional[float] = None) -> Optional[dict]:
@@ -406,47 +515,105 @@ class BulkClient:
         if size <= 0:
             return None
         order = {"type": "order", "symbol": sym, "is_buy": (not is_long),
-                 "price": 0, "size": size, "reduce_only": True,
+                 "price": 0, "size": size, "reduce_only": True, "iso": False,
                  "order_type": {"type": "market", "is_market": True}}
         logger.info(f"    <- market_close {'SELL' if is_long else 'BUY'} {size} {sym} (reduce_only)")
-        res = self._submit_signed(order)
-        if res is None or (isinstance(res, dict) and res.get("success") is False):
+        res, signed = self._submit_signed(order)
+        if not self._ok(res):
             return None
+        # Position is flat: pull any resting native stop so it can't fire later
+        # and open a fresh (reverse) position. exit_manager only cancels numeric
+        # ids, so this is the venue's own responsibility.
+        self._cancel_tracked_stop(symbol)
         return {"filled": True, "avg_price": current_price, "status": "filled",
-                "oid": res.get("order_id") if isinstance(res, dict) else None}
+                "oid": self._oid(res, signed)}
 
-    # ---- stops: BACKSTOP-ONLY on testnet ---------------------------
+    # ---- stops: NATIVE on mainnet, software backstop as the net ----
+    def _stop_supported(self, symbol: str) -> bool:
+        return self.native_stops and bool(self._meta(symbol).get("native_stop"))
+
+    def _cancel_tracked_stop(self, symbol: str):
+        sid = self._stop_ids.pop(_short(symbol), None)
+        if sid and sid != BACKSTOP_SENTINEL:
+            try:
+                self.cancel_order(symbol, sid)
+            except Exception as e:
+                logger.warning(f"cancel resting stop {symbol} {sid} failed: {e}")
+
     def place_stop_market(self, symbol: str, is_long: bool, size: float,
                           stop_px: float) -> Optional[str]:
-        # No native trigger on Bulk testnet - keep the position and let the
-        # software backstop enforce the stop. Returning a non-None, non-numeric
-        # sentinel prevents position_manager from flattening as 'unprotected'.
+        """Place a native stop-market that closes the position (sell for a
+        long, buy for a short). Returns the base58 order id (non-numeric, so
+        exit_manager never tries to cancel it directly), or BACKSTOP_SENTINEL to
+        keep the position under the software backstop when native placement is
+        unavailable/fails (BULK_STOP_FAIL_MODE=backstop), or None to make the
+        caller flatten (BULK_STOP_FAIL_MODE=flatten)."""
+        coin = _short(symbol)
+        if not self._stop_supported(symbol):
+            return BACKSTOP_SENTINEL
+        size = self._round_size(symbol, size)
+        trig = self._round_px(symbol, stop_px)
+        order = {"type": "stop", "symbol": bulk_symbol(symbol), "is_buy": (not is_long),
+                 "size": size, "trigger_price": trig, "iso": False}
+        res, signed = self._submit_signed(order)
+        oid = self._oid(res, signed) if self._ok(res) else None
+        if oid:
+            self._stop_ids[coin] = oid
+            logger.info(f"    [stop] native stop {coin} @ {trig} id {oid}")
+            return oid
+        logger.warning(f"native stop {coin} @ {trig} not confirmed: {self._err(res)} "
+                       f"-> {'software backstop' if self.stop_fail_mode != 'flatten' else 'FLATTEN'}")
+        if self.stop_fail_mode == "flatten":
+            return None
+        self._stop_ids[coin] = BACKSTOP_SENTINEL
         return BACKSTOP_SENTINEL
 
     def modify_stop(self, symbol: str, is_long: bool, size: float,
                     old_id, new_stop: float) -> Optional[str]:
-        return BACKSTOP_SENTINEL
+        """Move the stop: cancel the resting native stop, then place the new
+        one (never two live stops at once - that could double-close and flip).
+        The brief gap is covered by the software backstop."""
+        coin = _short(symbol)
+        if not self._stop_supported(symbol):
+            return BACKSTOP_SENTINEL
+        old = old_id if old_id not in (None, "", BACKSTOP_SENTINEL) else self._stop_ids.get(coin)
+        if old and old != BACKSTOP_SENTINEL:
+            if not self.cancel_order(symbol, old):
+                logger.warning(f"modify_stop {coin}: cancel of {old} not confirmed; "
+                               f"leaving it in place (no replacement to avoid a double stop)")
+                return str(old)
+            self._stop_ids.pop(coin, None)
+        new_id = self.place_stop_market(symbol, is_long, size, new_stop)
+        return new_id if new_id is not None else BACKSTOP_SENTINEL
 
     def cancel_order(self, symbol: str, oid) -> bool:
+        if oid in (None, "", BACKSTOP_SENTINEL):
+            return True
         order = {"type": "cancel", "symbol": bulk_symbol(symbol), "order_id": str(oid)}
-        res = self._submit_signed(order)
-        return bool(res) and (not isinstance(res, dict) or res.get("success") is not False)
+        res, _ = self._submit_signed(order)
+        return self._ok(res)
 
     # ---- candles (not on the fan-out hot path; HL is canonical) ----
     def fetch_candles(self, symbol: str, interval: str = "4h", limit: int = 200) -> list:
-        data = self._get(self.klines_path,
-                         params={"symbol": bulk_symbol(symbol), "interval": interval, "limit": limit})
+        span = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400,
+                "1d": 86400}.get(interval, 14400) * 1000
+        now_ms = int(time.time() * 1000)
+        data = self._get(self.klines_path, params={
+            "symbol": bulk_symbol(symbol), "interval": interval,
+            "startTime": now_ms - span * (limit + 2), "endTime": now_ms})
         rows = data if isinstance(data, list) else (data.get("data", []) if isinstance(data, dict) else [])
         out = []
         for c in rows or []:
             try:
                 if isinstance(c, dict):
-                    out.append({"t": int(c.get("t") or c.get("time") or c.get("openTime")),
+                    t = int(c.get("t") or c.get("time") or c.get("openTime"))
+                    out.append({"t": t, "T": int(c.get("T") or c.get("closeTime") or (t + span)),
                                 "o": float(c.get("o", c.get("open"))), "h": float(c.get("h", c.get("high"))),
                                 "l": float(c.get("l", c.get("low"))), "c": float(c.get("c", c.get("close"))),
                                 "v": float(c.get("v", c.get("volume") or 0))})
                 elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                    out.append({"t": int(c[0]), "o": float(c[1]), "h": float(c[2]),
+                    t = int(c[0])
+                    out.append({"t": t, "T": t + span, "o": float(c[1]), "h": float(c[2]),
                                 "l": float(c[3]), "c": float(c[4]),
                                 "v": float(c[5]) if len(c) > 5 else 0.0})
             except (TypeError, ValueError, KeyError):
@@ -457,5 +624,10 @@ class BulkClient:
     @staticmethod
     def _err(res) -> Optional[str]:
         if isinstance(res, dict):
-            return res.get("error") or res.get("message") or res.get("msg")
+            e = res.get("error") or res.get("message") or res.get("msg")
+            if e:
+                return str(e)
+            for s in res.get("statuses") or []:
+                if isinstance(s, dict) and s.get("error"):
+                    return str(s["error"])
         return None
