@@ -46,6 +46,7 @@ class FakeSession:
         self.account_shape = None       # override raw /account response
         self.positions = []
         self.n = 0
+        self.oracle_offset = 0.0
         self.marks = {"SOL-USD": 200.0, "ETH-USD": 3000.0, "ZEC-USD": 50.0, "SUI-USD": 3.0,
                       "FARTCOIN-USD": 1.2, "BNB-USD": 600.0, "DOGE-USD": 0.2}
     def get(self, url, params=None, timeout=None, headers=None):
@@ -56,7 +57,8 @@ class FakeSession:
                 for s in self.marks])
         for s, px in self.marks.items():
             if url.endswith(f"/ticker/{s}"):
-                return FakeResp({"symbol": s, "markPrice": px, "lastPrice": px + 0.01})
+                return FakeResp({"symbol": s, "markPrice": px, "oraclePrice": px + self.oracle_offset,
+                                 "lastPrice": px + 0.01})
         return FakeResp({"error": "not found"}, status=404)
     def post(self, url, json=None, timeout=None, headers=None):
         self.posts.append((url, json))
@@ -115,6 +117,11 @@ check("size floored to lot (1.0)", abs(act["m"]["sz"] - 1.0) < 1e-9)
 check("envelope account=MASTER signer=AGENT + nonce/signature",
       body["account"] == MASTER and body["signer"] == AGENT and body["nonce"] and body["signature"])
 check("market_open returns filled", res and res["filled"] and res["total_size"] == 1.0)
+cli.exec_slip_pct = 1.0; fake.posts.clear()
+cli.market_open("SOL", is_buy=True, notional_usd=200.0, current_price=200.0)
+act_l = fake.posts[-1][1]["actions"][0]
+check("BULK_EXEC_SLIP_PCT>0 -> IOC LIMIT entry (bounded sweep), not market", "l" in act_l and "m" not in act_l)
+cli.exec_slip_pct = 0.0
 
 fake.posts.clear()
 cli.market_close("SOL", size=1.0, is_long=True, current_price=210.0)
@@ -133,6 +140,17 @@ act = fake.posts[-1][1]["actions"][0]
 check("stop encodes as 'st' closing side (sell for long)",
       "st" in act and act["st"]["c"] == "SOL-USD" and act["st"]["d"] is False)
 check("stop trigger price + size", abs(act["st"]["tr"] - 180.0) < 1e-9 and abs(act["st"]["sz"] - 1.0) < 1e-9)
+check("stop-limit cap: lim = trigger*(1-1.5%) on a long close",
+      abs((act["st"].get("lim") or 0) - 180.0 * (1 - 0.015)) < 1e-6)
+fake.posts.clear(); cli.place_stop_market("SOL", False, 1.0, 220.0)
+act_s = fake.posts[-1][1]["actions"][0]
+check("stop-limit cap: lim = trigger*(1+1.5%) on a short close",
+      act_s["st"]["d"] is True and abs((act_s["st"].get("lim") or 0) - 220.0 * 1.015) < 1e-6)
+cli.stop_slip_pct = 0.0
+fake.posts.clear(); cli.place_stop_market("SOL", True, 1.0, 180.0)
+_lim = fake.posts[-1][1]["actions"][0]["st"].get("lim")
+check("BULK_STOP_SLIP_PCT=0 -> pure market stop (no limit)", _lim is None or _lim != _lim)
+cli.stop_slip_pct = 1.5
 check("returns non-numeric id (exit_manager won't cancel it)", sid and sid != bc.BACKSTOP_SENTINEL and not str(sid).isdigit())
 fake.posts.clear()
 sid2 = cli.modify_stop("SOL", True, 1.0, sid, 185.0)
@@ -151,7 +169,12 @@ check("native_stops=0 -> backstop sentinel", cli.place_stop_market("SOL", True, 
 cli.native_stops = True
 
 print("[4] reads: v1.0.19 fullAccount shape, None/[] discipline, prices")
-check("get_price SOL from /ticker/SOL-USD markPrice", cli.get_price("SOL") == 200.0)
+check("get_price SOL from /ticker/SOL-USD", cli.get_price("SOL") == 200.0)
+cli._px_cache.clear(); fake.oracle_offset = -1.0
+check("marks prefer oraclePrice (BULK_MARK_SOURCE=oracle, default)", cli.get_price("SOL") == 199.0)
+cli.mark_source = "mark"; cli._px_cache.clear()
+check("BULK_MARK_SOURCE=mark -> markPrice", cli.get_price("SOL") == 200.0)
+cli.mark_source = "oracle"; fake.oracle_offset = 0.0; cli._px_cache.clear()
 fake.positions = [{"symbol": "SOL-USD", "size": 5.0, "price": 199.0, "fairPrice": 200.0}]
 live = cli.get_positions()
 check("positions long (size +) -> +szi, entry from price", live and live[0]["szi"] == 5.0

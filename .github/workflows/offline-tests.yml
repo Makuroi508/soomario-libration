@@ -31,7 +31,7 @@ jobs:
       - name: Pacifica offline suite (32)
         run: python test_pacifica_offline.py
 
-      - name: Bulk offline suite (38, mainnet + agent signing)
+      - name: Bulk offline suite (44, mainnet + agent signing)
         run: python test_bulk_offline.py
 
       - name: Fan-out offline suite (13)

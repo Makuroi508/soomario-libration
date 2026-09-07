@@ -35,6 +35,16 @@ Env (set on Railway; never in code):
   BULK_NATIVE_STOPS     "1" (default) use native stop orders; "0" backstop-only
   BULK_STOP_FAIL_MODE   "backstop" (default: keep position, software backstop) |
                         "flatten" (close immediately if native stop can't be placed)
+  BULK_STOP_SLIP_PCT    1.5 (default): native stops are STOP-LIMIT with the limit
+                        this far past the trigger, so a thin book cannot fill a
+                        protective stop tens of percent away (Bulk 6 Sep incident:
+                        stops became market buys and swept $81k -> $115k). 0 = pure
+                        market stop. The software backstop still covers a gap.
+  BULK_MARK_SOURCE      "oracle" (default) | "mark": which ticker price drives our
+                        marks. During Bulk's bootstrap phase the local mark can be
+                        dislocated by a sparse book; oracle is the robust reference.
+  BULK_EXEC_SLIP_PCT    0 (default) = market entries/closes. >0 = IOC LIMIT at
+                        ref +/- this %, bounding how far an entry/close can sweep.
   BULK_ORDER_PATH / BULK_ACCOUNT_PATH / BULK_PRICE_PATH / BULK_KLINES_PATH  overrides
 """
 import logging
@@ -121,6 +131,9 @@ class BulkClient:
         self.account_path = os.getenv("BULK_ACCOUNT_PATH", "/account")
         self.price_path = os.getenv("BULK_PRICE_PATH", "/ticker")     # + /{SYMBOL-USD}
         self.klines_path = os.getenv("BULK_KLINES_PATH", "/klines")
+        self.stop_slip_pct = _f(os.getenv("BULK_STOP_SLIP_PCT", "1.5"), 1.5) or 0.0
+        self.mark_source = (os.getenv("BULK_MARK_SOURCE", "oracle") or "oracle").strip().lower()
+        self.exec_slip_pct = _f(os.getenv("BULK_EXEC_SLIP_PCT", "0"), 0.0) or 0.0
 
         self._signer = None
         self._signer_pub = None
@@ -342,8 +355,14 @@ class BulkClient:
         data = self._get(f"{self.price_path}/{bulk_symbol(sym)}", retries=1)
         px = None
         if isinstance(data, dict):
-            px = _f(data.get("markPrice") or data.get("lastPrice") or data.get("oraclePrice")
-                    or data.get("mark") or data.get("price"))
+            # oracle-anchored by default: Bulk's local mark can be dislocated by a
+            # sparse book (their 6 Sep incident); the external oracle is robust.
+            order = (("oraclePrice", "markPrice", "lastPrice") if self.mark_source == "oracle"
+                     else ("markPrice", "oraclePrice", "lastPrice"))
+            for k in order + ("mark", "price"):
+                px = _f(data.get(k))
+                if px is not None and px > 0:
+                    break
         if px is not None and px > 0:
             self._px_cache[sym] = (now, px)
             return px
@@ -476,6 +495,20 @@ class BulkClient:
         return round(px, 8)
 
     # ---- market open / close ---------------------------------------
+    def _exec_order(self, sym: str, is_buy: bool, size: float, reduce_only: bool,
+                    ref_px: Optional[float]) -> dict:
+        """Entry/close action. Default: market. With BULK_EXEC_SLIP_PCT>0: an IOC
+        LIMIT at ref +/- cap, so a thin book cannot sweep us far past the mark."""
+        if self.exec_slip_pct > 0 and ref_px and ref_px > 0:
+            cap = self.exec_slip_pct / 100.0
+            px = self._round_px(sym, ref_px * (1 + cap) if is_buy else ref_px * (1 - cap))
+            return {"type": "order", "symbol": sym, "is_buy": bool(is_buy), "price": px,
+                    "size": size, "reduce_only": bool(reduce_only), "iso": False,
+                    "order_type": {"type": "limit", "tif": "IOC"}}
+        return {"type": "order", "symbol": sym, "is_buy": bool(is_buy), "price": 0,
+                "size": size, "reduce_only": bool(reduce_only), "iso": False,
+                "order_type": {"type": "market", "is_market": True}}
+
     def market_open(self, symbol: str, is_buy: bool, notional_usd: float,
                     current_price: Optional[float] = None) -> Optional[dict]:
         sym = bulk_symbol(symbol)
@@ -494,9 +527,7 @@ class BulkClient:
             self.last_open_error = (f"below ${min_notional:.0f} min "
                                     f"(notional ${size*current_price:.2f})")
             return None
-        order = {"type": "order", "symbol": sym, "is_buy": bool(is_buy),
-                 "price": 0, "size": size, "reduce_only": False, "iso": False,
-                 "order_type": {"type": "market", "is_market": True}}
+        order = self._exec_order(sym, is_buy, size, False, current_price)
         logger.info(f"    -> market_open {'BUY' if is_buy else 'SELL'} {size} {sym} "
                     f"(ref ${current_price:.4f}, notional ${size*current_price:.2f})")
         res, signed = self._submit_signed(order)
@@ -514,9 +545,7 @@ class BulkClient:
         size = self._round_size(symbol, size)
         if size <= 0:
             return None
-        order = {"type": "order", "symbol": sym, "is_buy": (not is_long),
-                 "price": 0, "size": size, "reduce_only": True, "iso": False,
-                 "order_type": {"type": "market", "is_market": True}}
+        order = self._exec_order(sym, not is_long, size, True, current_price)
         logger.info(f"    <- market_close {'SELL' if is_long else 'BUY'} {size} {sym} (reduce_only)")
         res, signed = self._submit_signed(order)
         if not self._ok(res):
@@ -555,11 +584,19 @@ class BulkClient:
         trig = self._round_px(symbol, stop_px)
         order = {"type": "stop", "symbol": bulk_symbol(symbol), "is_buy": (not is_long),
                  "size": size, "trigger_price": trig, "iso": False}
+        if self.stop_slip_pct > 0:
+            # STOP-LIMIT: bound the fill to trigger -/+ cap (sell below for a long
+            # close, buy above for a short close). A gap past the cap leaves the
+            # stop unfilled and the software backstop takes over.
+            cap = self.stop_slip_pct / 100.0
+            order["limit_price"] = self._round_px(symbol, trig * (1 + cap) if (not is_long) else trig * (1 - cap))
         res, signed = self._submit_signed(order)
         oid = self._oid(res, signed) if self._ok(res) else None
         if oid:
             self._stop_ids[coin] = oid
-            logger.info(f"    [stop] native stop {coin} @ {trig} id {oid}")
+            lim = order.get("limit_price")
+            logger.info(f"    [stop] native stop {coin} @ {trig} "
+                        f"{'lim ' + str(lim) if lim is not None else '(market)'} id {oid}")
             return oid
         logger.warning(f"native stop {coin} @ {trig} not confirmed: {self._err(res)} "
                        f"-> {'software backstop' if self.stop_fail_mode != 'flatten' else 'FLATTEN'}")
