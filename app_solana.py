@@ -98,7 +98,22 @@ def run_worker():
         if not client.init_sdk():
             logger.error(f"[{name}] init_sdk failed - venue disabled this run.")
             continue
-        book = VenueBook(name, client, _venue_coins(name), STATE_DIR)
+        # Prune to what the venue ACTUALLY lists (live market meta from init_sdk).
+        # An unlisted coin can never trade here -- it would only produce rejected
+        # orders logged as misses (Pacifica: BookNotFound) -- so drop it loudly.
+        wanted = _venue_coins(name)
+        if hasattr(client, "lists"):
+            coins = [c for c in wanted if client.lists(c)]
+            dropped = [c for c in wanted if c not in coins]
+            if dropped:
+                logger.warning(f"[{name}] not listed on venue, dropped: {dropped}")
+        else:
+            coins = wanted
+        if not coins:
+            logger.error(f"[{name}] none of {wanted} are listed on the venue - venue disabled this run.")
+            continue
+        logger.info(f"[{name}] universe ({len(coins)}): {coins}")
+        book = VenueBook(name, client, coins, STATE_DIR)
         book.boot()
         # Bulk borrows HL marks if its native price feed path needs tuning.
         if name == "bulk" and hasattr(client, "set_price_fallback"):
