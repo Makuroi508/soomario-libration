@@ -28,19 +28,37 @@ These four decide pass/fail. Everything below this section stays the same.
 | `NOTIONAL_FRAC` | `0.08` | `0.12` | `0.12` | `0.12` |
 | `MAX_DD_PCT` | `3` | `5` | `6` | `8` |
 | `DD_TYPE` | `static` | `static` | `static` | `trailing` |
-| `DD_GUARD_MARGIN` | `0.5` | `0.75` | `1.0` | `1.5` |
-| `DAILY_DD_PCT` | `3` | `3` | `3` | `5` |
-| *simulated P(pass)* | *77%* | *92%* | *~95%* | *100%* |
-| *median days to target* | *91* | *82* | *~70* | *28* |
+| `DD_GUARD_MARGIN` | `0` | `0` | `0` | `0` |
+| `DAILY_DD_PCT` | `3` | `3` | `3` | `4` |
+| `MAX_CONCURRENT` | `8` | `8` | `8` | `8` |
+| *simulated P(pass)* | *92%* | *93%* | *94%* | *100%* |
+| *median days to target* | *90* | *79* | *61* | *27* |
 
 `DD_TYPE` is the one people get wrong: **1-Step floors are STATIC**, fixed at
 `start × (1 − dd)`, so profit becomes permanent cushion. Only the 2-Step
 Explorer trails the high-water mark. Running a 1-Step under `trailing` throws
 away the product's main advantage.
 
-`DD_GUARD_MARGIN` is how far *above* the real floor the bot flattens. At the
-default `1.5` on a 3% challenge you surrender **half your allowance** to the
-buffer.
+`DD_GUARD_MARGIN` is how far *above* the real floor the bot flattens — and it
+should be **`0`**. Measured across 1,500 simulated attempts per setting, the
+margin never once improved P(pass); it only ever cost it, because a flatten is
+not a pause. `check_max_dd()` keeps the book empty until a human intervenes, so
+an early flatten converts "might recover" into "definitely done":
+
+| Challenge | margin 0 | margin 1.5 | cost |
+|---|---:|---:|---:|
+| Explorer 8% | **100%** | 91.3% | -8.7pp |
+| Pro 5% | **92.9%** | 87.8% | -5.1pp |
+| Turbo 3% | **92.2%** | 74.1% | **-18.1pp** |
+| Classic 6% | **94.1%** | 92.2% | -1.9pp |
+
+The Turbo is worst because 1.5 points of a 3% allowance is half the room.
+
+**What the simulation cannot see:** the margin exists to stop a price gap
+carrying equity through the floor between polls. Equity here moves trade by
+trade, so there is no gap to model and this test structurally cannot show the
+benefit the margin was designed for. The real protection against that is
+`MAX_CONCURRENT`, not the margin — see below.
 
 ---
 
@@ -67,28 +85,49 @@ from the API and only warns if yours disagrees. Leave it blank.
 ```
 NOTIONAL_FRAC=0.12          # see the dial above
 LEVERAGE=2
-MAX_CONCURRENT=8            # was 6; 6 blocked 101 entries over 12 months
+MAX_CONCURRENT=8            # 6 if you want a provably un-killable worst case
 MAX_DD_PCT=5                # see the dial
 DD_TYPE=static              # see the dial
-DD_GUARD_MARGIN=0.75        # see the dial
+DD_GUARD_MARGIN=0           # never flatten early — it only costs pass rate
 DAILY_DD_PCT=3
-DAILY_FLATTEN=1             # was 0 — see note
+DAILY_FLATTEN=0             # off: flattening a drawdown locks in losses that recover
 ```
 
 **`MAX_CONCURRENT`** — leave it set. Unset it and the formula gives
-`int(LEVERAGE/NOTIONAL_FRAC)` = 16 at 0.12, which is far more correlated
-exposure than a prop floor tolerates. Measured over 12 months: cap 6 blocks 101
-entries, cap 8 blocks 8, cap 10 blocks 0. Going 6 → 8 lifts P(pass) on Pro from
-89.0% to 90.8% and on Turbo from 73.0% to 78.0%, with no increase in drawdown.
-Past 8 there is no further gain.
+`int(LEVERAGE/NOTIONAL_FRAC)` = 16 at 0.12, far more correlated exposure than a
+prop floor tolerates.
 
-**`DAILY_FLATTEN=1`** — your current `0` is the Hyperliquid default and the
-config's own comment argues against it here: *"Halting only stops digging —
-open positions keep bleeding toward the venue's hard daily limit. On a prop
-account that is what ends the challenge, so the guard must also FLATTEN."*
-Halting alone stops new entries but lets open positions keep running toward the
-3% daily limit. I have **not** simulated the flatten behaviour, so treat this as
-following the code author's stated intent rather than a tested result.
+It is also the real defence against a mass stop-out, which is the scenario the
+guard margin was meant to cover. A 10% hard stop costs `frac x 10%` of equity,
+so the worst case if every open position stops at once is `cap x frac x 10%`:
+
+| | cap 4 | cap 6 | cap 8 | cap 10 |
+|---|---:|---:|---:|---:|
+| frac 0.08 | 3.2% | 4.8% | 6.4% | 8.0% ⚠ |
+| frac 0.12 | 4.8% | **7.2%** | 9.6% ⚠ | 12.0% ⚠ |
+| frac 0.16 | 6.4% | 9.6% ⚠ | 12.8% ⚠ | 16.0% ⚠ |
+
+At **0.12 x cap 6 = 7.2%** the account cannot be killed by a simultaneous
+stop-out, because the worst case sits inside the 8% floor. At cap 8 it is 9.6%
+and it can. The price of that safety is real but small — P(pass) at margin 0
+drops from 100% to 93.0% on the Explorer and 92.9% to 89.5% on the Pro.
+
+For context, the live Hyperliquid book's worst observed day was **2** hard stops
+(11 stops across 8 distinct days), which at 0.12 is 2.4% — nowhere near either
+bound. Cap 8 is the higher-expectancy choice; cap 6 is the one that cannot lose
+the account to a single correlated event.
+
+**`DAILY_FLATTEN=0`** — keep it off. The config comment argues for `1` on prop
+accounts, but live experience on this account contradicts it: flattening during
+a drawdown closed positions that subsequently recovered, and the realized loss
+was worse than riding them. Since the trailing stop and the resting hard stop
+already bound every position, the flatten adds forced selling at the worst
+moment without adding protection.
+
+The cost of leaving it off is that open positions can keep bleeding past the
+venue's daily limit after the halt has stopped new entries. `DAILY_DD_PCT` is
+therefore set *below* the venue limit (4 against Explorer's 5) so the halt fires
+early and leaves the open book a point of room to resolve on its own.
 
 ---
 
@@ -171,23 +210,23 @@ against tighter trails.
 
 ---
 
-## Ready to paste — Bronze 1-Step Pro ($25k, +12%, 5% static)
+## Ready to paste — Explorer 2-Step, fresh account ($10k, +5%, 8% trailing)
 
 ```
 EXCHANGE=propr
-PROPR_API_KEY=<secret>
-PROPR_ACCOUNT_ID=<urn>
+PROPR_API_KEY=<your key>
+PROPR_ACCOUNT_ID=<new urn>
 PROPR_API_BASE=https://api.propr.xyz/v1
 STATE_PATH=/data
 
 NOTIONAL_FRAC=0.12
 LEVERAGE=2
 MAX_CONCURRENT=8
-MAX_DD_PCT=5
-DD_TYPE=static
-DD_GUARD_MARGIN=0.75
-DAILY_DD_PCT=3
-DAILY_FLATTEN=1
+MAX_DD_PCT=8
+DD_TYPE=trailing
+DD_GUARD_MARGIN=0
+DAILY_DD_PCT=4
+DAILY_FLATTEN=0
 
 COINS=HYPE,CC,SOL,ONDO,kPEPE,SUI,LINK,FARTCOIN,JTO,PENGU,XMR
 WATCH=FARTCOIN,JTO,PENGU,XMR
@@ -200,10 +239,11 @@ ADOPT_ORPHANS=1
 MEASURED_FRICTION_PCT=0.16
 ```
 
-Strategy variables are omitted on purpose — unset means the frozen validated
-defaults, which is what you want.
+Simulated P(pass) 100%, median 27 days. Strategy variables are omitted on
+purpose — unset means the frozen validated defaults.
 
----
+Swap `MAX_CONCURRENT=6` if you would rather the account be un-killable by a
+single correlated stop-out; that costs about 7 points of pass rate.
 
 ## A caution on the numbers
 
