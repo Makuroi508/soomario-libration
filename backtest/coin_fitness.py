@@ -225,7 +225,8 @@ def run(coins, window=None, frac=0.20, leverage=2.0, friction=FRICTION,
     eq, peak, dd_ = START_EQ, START_EQ, 0.0
     for t in sorted(trades, key=lambda z: z["closed_t"]):
         eq += t["pnl"]; peak = max(peak, eq); dd_ = min(dd_, (eq - peak) / peak * 100)
-    return {"n": len(trades), "pnl": realized, "ret_pct": realized / START_EQ * 100,
+    return {"trades": sorted(trades, key=lambda t: t["closed_t"]),
+            "n": len(trades), "pnl": realized, "ret_pct": realized / START_EQ * 100,
             "avg": st.mean(nets) if nets else 0.0,
             "win": 100 * sum(1 for x in nets if x > 0) / len(nets) if nets else 0,
             "hard": sum(1 for t in trades if t["reason"] == "HARD_STOP"),
