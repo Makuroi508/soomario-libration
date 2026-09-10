@@ -192,11 +192,12 @@ class ExitManager:
         res = self.client.market_close(pos["coin"], pos["qty"], is_long, current_price=price)
         if res and res.get("filled"):
             sid = pos.get("hard_stop_id")
-            if sid:
+            if sid and not getattr(self.client, "stops_outlive_position", False):
                 # Clear any stale trigger. Propr order ids are URNs
                 # ('urn:prp-order:...'); HL's are ints. Gating on isdigit() alone
                 # would skip every Propr cancel and leave orphaned reduce-only
                 # stops resting against positions we've since reopened.
+                # Venues that leak triggers are handled once, in close_position.
                 try:
                     self.client.cancel_order(
                         pos["coin"], int(sid) if str(sid).isdigit() else sid)
@@ -261,6 +262,36 @@ class ExitManager:
             reason = "TRAIL" if pos["trail_active"] else "HARD_STOP"
             self.close_position(pos, fill_px=stop, reason=reason)
 
+    def _cancel_resting_stop(self, pos):
+        """Pull the position's resting protective trigger off the book.
+
+        Runs on every path that DROPS a position from our book, including the
+        ones that never sent a close (a reconcile-booked exit, a void). Only for
+        venues whose client declares `stops_outlive_position` — on Bulk a
+        reduce-only trigger keeps resting after the position it guards is gone,
+        so a dropped position leaves a live conditional order on a flat account
+        that will open a brand new, unmanaged position if it ever fires. Venues
+        that cancel the trigger themselves opt out: asking them to cancel an oid
+        the exchange already consumed just logs a failure on every close.
+
+        Order ids vary by venue (HL ints, Propr 'urn:prp-order:...' URNs, Bulk
+        base58 hashes, the paper/backstop sentinels), so cast only when the id is
+        numeric and never let a cancel failure block the booking.
+        """
+        if not getattr(self.client, "stops_outlive_position", False):
+            return          # venue kills the trigger with the position
+        sid = pos.get("hard_stop_id")
+        if not sid or str(sid) in ("paper", "backstop"):
+            return
+        try:
+            self.client.cancel_order(
+                pos["coin"], int(sid) if str(sid).isdigit() else sid)
+        except (TypeError, ValueError):
+            pass
+        except Exception as e:
+            logger.warning(f"{pos['coin']}: could not cancel resting stop {sid}: {e} "
+                           f"— check the venue for a leftover conditional order.")
+
     # ── booking a close (paper idealized, or live actual fill) ─
     def close_position(self, pos: dict, fill_px: float, reason: str,
                        fee: float = 0.0, intended_exit: float = None):
@@ -293,6 +324,8 @@ class ExitManager:
             friction_pct=friction_pct, fee=round(fee or 0.0, 6),
             exit_reason=reason, opened_at=pos.get("opened_at"), closed_at=iso(),
         ))
+        if not config.PAPER:
+            self._cancel_resting_stop(pos)
         self.db.delete_position(pos["coin"])
         fr = "" if friction_pct is None else f" friction {friction_pct:+.2f}%"
         logger.info(f"    ◼ CLOSE {reason} {pos['coin']} @ ${fill_px:.6f} "
@@ -385,6 +418,15 @@ class ExitManager:
             return
         open_db = self.db.open_positions()
         self._check_orphans(live, open_db)
+        # The reverse of an orphan position: a protective trigger still resting
+        # on a coin we no longer hold. Venues that auto-cancel one with its
+        # position don't implement this hook; Bulk, which doesn't, does.
+        sweep = getattr(self.client, "sweep_orphan_stops", None)
+        if sweep:
+            try:
+                sweep({p["coin"].upper() for p in open_db})
+            except Exception as e:
+                logger.warning(f"orphan-stop sweep failed: {e}")
         if not open_db:
             return
         live_coins = {short_name(str(p.get("coin", p.get("symbol", "")))).upper() for p in live}
@@ -468,6 +510,8 @@ class ExitManager:
         to the dashboard timeline so the gap is visible rather than silent.
         """
         coin = pos["coin"].upper()
+        if not config.PAPER:
+            self._cancel_resting_stop(pos)
         self.db.delete_position(coin)
         self._gone_streak.pop(coin, None)
         append_jsonl(TRADE_LOG, {

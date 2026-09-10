@@ -45,6 +45,13 @@ Env (set on Railway; never in code):
                         dislocated by a sparse book; oracle is the robust reference.
   BULK_EXEC_SLIP_PCT    0 (default) = market entries/closes. >0 = IOC LIMIT at
                         ref +/- this %, bounding how far an entry/close can sweep.
+  BULK_FILL_CONFIRM_SEC 8 (default): how long market_open waits for the venue to
+                        SHOW the position before deciding the accepted order never
+                        filled. 0 disables the check (trust acceptance, pre-fix
+                        behaviour). An unreadable account is 'unknown', not 'flat'.
+  BULK_SWEEP_ORPHANS    "1" (default): cancel resting reduce-only/trigger orders
+                        for coins the venue confirms flat (a stop left behind by a
+                        position the book already dropped). "0" to disable.
   BULK_ORDER_PATH / BULK_ACCOUNT_PATH / BULK_PRICE_PATH / BULK_KLINES_PATH  overrides
 """
 import logging
@@ -67,6 +74,7 @@ MAX_RETRIES = 3
 BASE_BACKOFF_SEC = 1.5
 HTTP_TIMEOUT = 10
 PRICE_TTL_SEC = 8.0          # dedupe per-symbol ticker reads within a tick
+SWEEP_EVERY_SEC = 300.0      # orphan-trigger sweep cadence (extra /account read)
 
 DEFAULT_REST = {
     "mainnet": "https://mainnet-api1.bulk.trade/api/v1",
@@ -119,6 +127,11 @@ def _find_key(obj, keys, _depth=0):
 
 
 class BulkClient:
+    # Bulk does NOT cancel a reduce-only trigger when the position it guards
+    # goes flat (HL and Propr do). exit_manager reads this to pull the trigger on
+    # every path that DROPS a position, not just the ones that close it.
+    stops_outlive_position = True
+
     def __init__(self):
         self.network = (os.getenv("BULK_NETWORK", "mainnet") or "mainnet").strip().lower()
         self.rest_url = (os.getenv("BULK_REST_URL") or DEFAULT_REST.get(self.network, DEFAULT_REST["mainnet"])).rstrip("/")
@@ -134,6 +147,8 @@ class BulkClient:
         self.stop_slip_pct = _f(os.getenv("BULK_STOP_SLIP_PCT", "1.5"), 1.5) or 0.0
         self.mark_source = (os.getenv("BULK_MARK_SOURCE", "oracle") or "oracle").strip().lower()
         self.exec_slip_pct = _f(os.getenv("BULK_EXEC_SLIP_PCT", "0"), 0.0) or 0.0
+        self.fill_confirm_sec = _f(os.getenv("BULK_FILL_CONFIRM_SEC", "8"), 8.0) or 0.0
+        self.sweep_orphans = os.getenv("BULK_SWEEP_ORPHANS", "1") == "1"
 
         self._signer = None
         self._signer_pub = None
@@ -143,6 +158,8 @@ class BulkClient:
         self.price_fallback: Optional[Callable] = None   # e.g. HL get_all_prices
         self._px_cache = {}              # SYMBOL -> (ts, px)
         self._stop_ids = {}              # SYMBOL -> resting native stop order id
+        self._orders_shape_logged = False
+        self._last_sweep = 0.0
         self._sess = requests.Session()
 
     # ---- lifecycle -------------------------------------------------
@@ -430,7 +447,10 @@ class BulkClient:
     def get_positions(self):
         """None on FAILED read, [] on confirmed-empty. Normalizes to
         {coin, szi (+long/-short), entryPx}."""
-        fa = self._full_account()
+        return self._positions_from(self._full_account())
+
+    @staticmethod
+    def _positions_from(fa):
         if fa is None:
             return None
         out = []
@@ -534,8 +554,60 @@ class BulkClient:
         if not self._ok(res):
             self.last_open_error = self._err(res) or "not_filled"
             return None
+
+        # ── acceptance is NOT a fill ──────────────────────────────────
+        # Bulk answers the signed submit with an ack; whether the order actually
+        # crossed is only knowable from the account. Reporting an unfilled order
+        # as filled writes a position the venue does not have: the book then
+        # attaches a protective stop to nothing (which rests on a flat account
+        # forever) and reconcile eventually books a fabricated close for a trade
+        # that never happened. Both were observed on 10 Sep 2026 (DOGE voided
+        # after 30 reads; SOL booked at a mark estimate 14 minutes after entry,
+        # each leaving a live conditional order behind).
+        conf = self._confirm_open(symbol, is_buy)
+        if conf is None:
+            # Account unreadable — 'unknown', never 'flat'. Stay optimistic and
+            # let reconcile arbitrate; dropping a position that IS live would be
+            # strictly worse (unmanaged and unstopped).
+            logger.warning(f"bulk {sym}: entry accepted but the account could not be read to "
+                           f"confirm the fill — booking it and letting reconcile arbitrate.")
+        elif conf is False:
+            self.last_open_error = "accepted but no position on venue"
+            logger.error(f"bulk {sym}: order ACCEPTED but the venue shows no position after "
+                         f"{self.fill_confirm_sec:.0f}s — treating as NOT filled (no phantom "
+                         f"book entry, no orphan stop). response={str(res)[:240]}")
+            return None
+        else:
+            # Venue truth beats our reference price for both fill and size.
+            entry = _f(conf.get("entryPx")) or current_price
+            filled = abs(_f(conf.get("szi"), 0.0) or 0.0) or size
+            return {"filled": True, "avg_price": entry, "total_size": filled,
+                    "status": "filled", "oid": self._oid(res, signed)}
         return {"filled": True, "avg_price": current_price, "total_size": size,
                 "status": "filled", "oid": self._oid(res, signed)}
+
+    def _confirm_open(self, symbol: str, is_buy: bool):
+        """Poll the account until the venue SHOWS the new position.
+
+        Returns the position dict once it appears, False when a SUCCESSFUL read
+        says the coin is flat for the whole window, or None when no read
+        succeeded (unknown). Side matters: a stale opposite-side position is not
+        confirmation of this entry."""
+        if self.fill_confirm_sec <= 0 or DRY_RUN:
+            return None
+        u = _short(symbol)
+        deadline = time.time() + self.fill_confirm_sec
+        read_ok = False
+        while True:
+            live = self.get_positions()
+            if live is not None:
+                read_ok = True
+                for p in live:
+                    if p["coin"] == u and ((p["szi"] > 0) == bool(is_buy)):
+                        return p
+            if time.time() >= deadline:
+                return False if read_ok else None
+            time.sleep(1.0)
 
     def market_close(self, symbol: str, size: float, is_long: bool,
                      current_price: Optional[float] = None) -> Optional[dict]:
@@ -629,6 +701,74 @@ class BulkClient:
         order = {"type": "cancel", "symbol": bulk_symbol(symbol), "order_id": str(oid)}
         res, _ = self._submit_signed(order)
         return self._ok(res)
+
+    # ---- orphan protective orders ----------------------------------
+    _ORDER_ID_KEYS = ("orderId", "order_id", "oid", "id")
+    _TRIGGER_KEYS = ("triggerPrice", "trigger_price", "stopPrice", "stop_price", "tr")
+
+    def sweep_orphan_stops(self, keep_coins=None) -> int:
+        """Cancel protective triggers resting on coins the venue confirms FLAT.
+
+        Bulk does not kill a reduce-only trigger when the position it guards goes
+        away, so any path that drops a position without an explicit cancel leaves
+        a live conditional order on a flat account — visible to the user as a
+        phantom 'Close Short' and, if it ever triggers, an unmanaged new position.
+        exit_manager now cancels on every close, but that cannot reach orders
+        already stranded (or ones stranded by a crash/redeploy, since the id map
+        is in-process). This reads the account and sweeps them.
+
+        Only orders that are unambiguously protective are touched: a trigger
+        price or an explicit reduce-only flag. Anything whose shape we do not
+        recognise is left alone and logged once — never guess at a user's own
+        resting order. Returns the number cancelled."""
+        if not self.sweep_orphans:
+            return 0
+        # One extra account read every SWEEP_EVERY_SEC, not every tick: a
+        # stranded trigger is a slow leak, not an emergency, and /account is the
+        # endpoint that 502s under load.
+        now = time.time()
+        if now - self._last_sweep < SWEEP_EVERY_SEC:
+            return 0
+        self._last_sweep = now
+        fa = self._full_account()
+        if fa is None:
+            return 0
+        orders = None
+        for k in ("openOrders", "open_orders", "orders"):
+            if isinstance(fa.get(k), list):
+                orders = fa[k]
+                break
+        if not orders:
+            return 0
+        live = {p["coin"] for p in (self._positions_from(fa) or [])}
+        keep = {str(c).upper() for c in (keep_coins or [])} | live
+        cancelled = 0
+        for o in orders:
+            if not isinstance(o, dict):
+                continue
+            coin = _short(o.get("symbol", o.get("coin", o.get("c", ""))))
+            if not coin or coin in keep:
+                continue
+            oid = _find_key(o, self._ORDER_ID_KEYS)
+            trig = _find_key(o, self._TRIGGER_KEYS)
+            reduce_only = o.get("reduceOnly", o.get("reduce_only", o.get("r")))
+            protective = trig is not None or reduce_only is True
+            if oid is None or not protective:
+                if not self._orders_shape_logged:
+                    self._orders_shape_logged = True
+                    logger.warning(f"bulk: resting order on flat {coin or '?'} not recognised as a "
+                                   f"protective trigger — leaving it alone. shape={str(o)[:240]}")
+                continue
+            if self.cancel_order(coin, oid):
+                cancelled += 1
+                logger.warning(f"🧹 bulk: cancelled ORPHAN protective order on {coin} "
+                               f"(id {oid}{'' if trig is None else f', trigger {trig}'}) — the "
+                               f"venue shows no position in {coin}.")
+                self._stop_ids.pop(coin, None)
+            else:
+                logger.error(f"bulk: orphan order {oid} on flat {coin} would not cancel "
+                             f"— cancel it by hand on the venue.")
+        return cancelled
 
     # ---- candles (not on the fan-out hot path; HL is canonical) ----
     def fetch_candles(self, symbol: str, interval: str = "4h", limit: int = 200) -> list:
