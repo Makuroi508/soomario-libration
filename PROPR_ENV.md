@@ -160,16 +160,45 @@ TRAIL_PCT=0.55
 HARD_STOP_PCT=10
 TRAIL_ENABLED=1
 TRAIL_ARM_DELAY_BARS=1
-COIN_PARAMS=<leave unset — the built-in default is the tuned set>
+COIN_PARAMS={}
 ```
 
-Every one of these is walk-forward validated, and each alternative tested here
-(RSI levels 30/35/40/50, trail widths, take-profit rules, 15m/30m/1h
-timeframes) lost out of sample. Leave `COIN_PARAMS` unset so the code's own
-default applies — it carries CC's 50/65 straddle, the per-coin trail widths and
-the 30-minute arming delays.
+### ⚠ `COIN_PARAMS={}` must be set EXPLICITLY
 
----
+Leaving it unset does **not** give you the frozen strategy. `config.py` reads
+`os.getenv("COIN_PARAMS", _COIN_PARAMS_DEFAULT)`, and that default is the tuned
+set. Verified:
+
+| Env | Result |
+|---|---|
+| `COIN_PARAMS` unset | **8 overrides active** — CC, FARTCOIN, JTO, kPEPE, LINK, PENGU, SUI, XMR |
+| `COIN_PARAMS={}` | 0 overrides — every coin on the HYPE settings |
+
+Set the literal two characters `{}` as the value.
+
+### Why frozen
+
+Every alternative tested lost out of sample: RSI levels 30/35/40/50, trail
+widths 0.2-3.0%, arming delays 0 to one day, take-profit rules, 15m/30m/1h/6h/
+daily timeframes, and a two-parameter arm/band split. The per-coin overrides
+themselves show the clearest overfitting signature of the lot — they help on
+every window inside their 2026-08-16 fitting period and hurt on every window
+outside it.
+
+The cost is real and worth stating: on the full 12 months the tuned set turns
+$2,000 into $4,247 against frozen's $3,135. But that 12 months IS the fitting
+period. After the grid date, frozen leads +0.243 against the tuned set's -0.086
+per trade.
+
+### What does NOT change
+
+`WATCH` stays. It is position SIZING, not a strategy parameter, and it is free:
+at half size the book returns the same (12mo +0.142 vs +0.139, test +0.229 vs
++0.226, post-fit identical at +0.243) while drawdown improves from **-20.8% to
+-16.9%**. Keep `WATCH_SIZE_MULT=0.5`.
+
+`TRAIL_ARM_DELAY_BARS=1` also stays — one 4h bar IS the HYPE setting, and the
+sweep from immediate to one day confirmed it is the best uniform value.
 
 ## 6 — Operations
 
@@ -233,14 +262,17 @@ WATCH=FARTCOIN,JTO,PENGU,XMR
 WATCH_SIZE_MULT=0.5
 UNIVERSE_AUTOFILTER=0
 
+COIN_PARAMS={}
+
 POLL_SECONDS=120
 RECONCILE_INTERVAL_SEC=300
 ADOPT_ORPHANS=1
 MEASURED_FRICTION_PCT=0.16
 ```
 
-Simulated P(pass) 100%, median 27 days. Strategy variables are omitted on
-purpose — unset means the frozen validated defaults.
+Simulated P(pass) 100%, median 27 days. `COIN_PARAMS={}` is the one strategy
+variable that MUST be set — unset silently keeps the eight per-coin overrides.
+The rest are omitted on purpose; unset gives the frozen validated defaults.
 
 Swap `MAX_CONCURRENT=6` if you would rather the account be un-killable by a
 single correlated stop-out; that costs about 7 points of pass rate.
