@@ -26,6 +26,7 @@ from pathlib import Path
 
 import config
 import signals
+import feeds
 from utils import iso, save_json, append_jsonl
 from db import DB
 from position_manager import PositionManager
@@ -78,15 +79,18 @@ class SignalEngine:
         fired = {}
         for coin in self.coins:
             try:
-                candles = self.hl.fetch_candles(coin, config.RSI_TF, config.CANDLE_LIMIT)
+                candles = feeds.fetch_candles(config.signal_venue(coin), coin,
+                                              config.rsi_tf(coin), config.CANDLE_LIMIT,
+                                              hl_client=self.hl)
                 closed = signals.closed_candles(candles, now_ms)
-                if len(closed) < config.RSI_LEN + 2:
+                _len = config.rsi_len(coin)
+                if len(closed) < _len + 2:
                     continue
                 last_ts = closed[-1]["t"]
                 st = self.db.get_rsi_state(coin)
                 seen = int(st["last_closed_4h_ts"]) if st and st.get("last_closed_4h_ts") else None
                 closes = [c["c"] for c in closed]
-                rsi = signals.wilder_rsi(closes, config.RSI_LEN)
+                rsi = signals.wilder_rsi(closes, _len)
                 # Persist the newest RSI + bar ts in the shared DB (the double-fire
                 # guard). This is the ONLY writer of rsi_state, so the cross can
                 # never be re-evaluated by a second venue on the same bar.

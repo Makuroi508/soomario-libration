@@ -47,6 +47,7 @@ try:
     from shadow import ShadowTracker
     import universe
     import signals
+    import feeds
     from api import app as flask_app, attach_state
     print("[boot] modules OK", flush=True)
 except Exception as e:
@@ -411,7 +412,7 @@ def run_worker():
 # Bar length in ms, for gating the candle pull to the bar boundary (see tick()).
 _INTERVAL_MS = {
     "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
-    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000,
     "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
 }
 
@@ -463,11 +464,14 @@ def tick(hl, db, pm, em, shadow):
     # per service. Gated, it is 20 calls per 4h bar — a >300x reduction — and
     # the entry logic is bit-identical because a mid-bar fetch could never have
     # produced a new signal anyway.
-    _bar_ms = _INTERVAL_MS.get(config.RSI_TF, 4 * 3_600_000)
-    _expect_last_close = (now_ms // _bar_ms) * _bar_ms - _bar_ms
-
     for coin in config.COINS:
         try:
+            # Timeframe, RSI length and candle source are all per-coin now, so
+            # the bar gate has to be computed per coin too -- a 30m coin must
+            # not be held back by the 4h boundary.
+            _tf = config.rsi_tf(coin)
+            _bar_ms = _INTERVAL_MS.get(_tf, config.bar_seconds(coin) * 1000)
+            _expect_last_close = (now_ms // _bar_ms) * _bar_ms - _bar_ms
             _st = db.get_rsi_state(coin)
             _seen = int(_st["last_closed_4h_ts"]) if _st and _st.get("last_closed_4h_ts") else None
             # Already hold the newest closed bar for this coin → nothing to learn.
@@ -475,7 +479,8 @@ def tick(hl, db, pm, em, shadow):
             # off get_all_prices() above, which still polls every tick.
             if _seen is not None and _seen >= _expect_last_close:
                 continue
-            candles = hl.fetch_candles(coin, config.RSI_TF, config.CANDLE_LIMIT)
+            candles = feeds.fetch_candles(config.signal_venue(coin), coin, _tf,
+                                          config.CANDLE_LIMIT, hl_client=hl)
             closed = signals.closed_candles(candles, now_ms)
             # Persist daily closes for the report benchmarks while the candles are
             # already in hand — no extra network, and the 200-bar pull backfills
@@ -484,13 +489,14 @@ def tick(hl, db, pm, em, shadow):
                 db.record_daily_closes(coin, closed)
             except Exception as e:                      # noqa: BLE001
                 logger.debug(f"daily price capture failed for {coin}: {e}")
-            if len(closed) < config.RSI_LEN + 2:
+            _len = config.rsi_len(coin)
+            if len(closed) < _len + 2:
                 continue
             last_ts = closed[-1]["t"]
             st = db.get_rsi_state(coin)
             seen = int(st["last_closed_4h_ts"]) if st and st.get("last_closed_4h_ts") else None
             closes = [c["c"] for c in closed]
-            rsi = signals.wilder_rsi(closes, config.RSI_LEN)
+            rsi = signals.wilder_rsi(closes, _len)
             db.set_rsi_state(coin, last_ts, rsi[-1])
             if seen is None:
                 # Cold start: prime state but do NOT trade a cross that completed

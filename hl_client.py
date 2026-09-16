@@ -224,6 +224,40 @@ def round_price(asset_meta: dict, symbol: str, price: float) -> float:
 #  HL client
 # ═══════════════════════════════════════════════════════════════
 
+# Intervals Hyperliquid actually serves; 3h and 6h are not among them.
+_HL_NATIVE_TF = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h",
+                 "12h", "1d", "3d", "1w", "1M")
+
+
+def _divisor_tf(step_ms, table):
+    """Largest native interval that divides `step_ms` exactly."""
+    best = None
+    for name in _HL_NATIVE_TF:
+        ms = table.get(name)
+        if ms and step_ms % ms == 0 and (best is None or ms > table[best]):
+            best = name
+    return best
+
+
+def _roll_up(candles, step_ms):
+    """Aggregate finer candles into `step_ms` buckets aligned to the UTC epoch.
+    A partial trailing bucket is kept: closed_candles() drops it by its close
+    time, exactly as it does for a native still-forming bar."""
+    out = {}
+    for c in candles:
+        b = (c["t"] // step_ms) * step_ms
+        g = out.get(b)
+        if g is None:
+            out[b] = {"t": b, "T": b + step_ms - 1, "o": c["o"], "h": c["h"],
+                      "l": c["l"], "c": c["c"], "v": c.get("v", 0.0)}
+        else:
+            g["h"] = max(g["h"], c["h"])
+            g["l"] = min(g["l"], c["l"])
+            g["c"] = c["c"]
+            g["v"] = g.get("v", 0.0) + c.get("v", 0.0)
+    return [out[k] for k in sorted(out)]
+
+
 class HLClient:
     """Dual-DEX-aware Hyperliquid client."""
 
@@ -1012,9 +1046,12 @@ class HLClient:
 
     # ── Candles (4h OHLC for RSI) ──────────────────────────────
 
+    # Includes intervals Hyperliquid does NOT serve (6h): fetch_candles rolls
+    # those up from a native divisor, so the step must still be known here.
     _INTERVAL_MS = {
-        "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
-        "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+        "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+        "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+        "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
     }
 
     def fetch_candles(self, symbol: str, interval: str = "4h", limit: int = 200) -> list[dict]:
@@ -1028,6 +1065,19 @@ class HLClient:
         if not step:
             logger.error(f"❌ unsupported interval {interval!r}")
             return []
+        # Hyperliquid serves 2h and 8h but NOT 6h (verified against the API:
+        # 6h returns a deserialization error, not an empty list). Any timeframe
+        # it does not offer is rolled up from the largest native one that
+        # divides it -- 6h = 3 x 2h, aligned because both start on an even UTC
+        # boundary.
+        if interval not in _HL_NATIVE_TF:
+            base = _divisor_tf(step, self._INTERVAL_MS)
+            if base is None:
+                logger.error(f"unsupported interval {interval!r}: not native, not divisible")
+                return []
+            per = step // self._INTERVAL_MS[base]
+            return _roll_up(self.fetch_candles(symbol, base, (limit + 2) * per),
+                            step)[-(limit + 2):]
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - (limit + 2) * step
         try:

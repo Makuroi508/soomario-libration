@@ -176,5 +176,99 @@ check("four rules -> four buckets, nothing pooled", len(keys) == 4)
 check("every bucket kept its one trade",
       all(v["n"] == 1 for v in db5.shadow_summary().values()))
 
+
+print("\n[4] per-coin RSI timeframe, length and signal venue")
+import importlib                                # noqa: E402
+import json as _json                            # noqa: E402
+os.environ["COIN_PARAMS"] = _json.dumps({
+    "TAO": {"rsi_tf": "6h", "arm_delay_min": 1440},
+    "AVAX": {"rsi_tf": "1h", "rsi_len": 13, "long_level": 71, "short_level": 32,
+             "trail_pct": 0.4, "arm_delay_min": 60},
+    "XLM": {"rsi_len": 5, "long_level": 20, "short_level": 55,
+            "hard_stop_pct": 6.15, "trail_pct": 0.2},
+    "HYPE": {"signal_venue": "bybit"},
+    "CRV": {"signal_venue": "okx", "short_level": 25, "hard_stop_pct": 10.75,
+            "trail_pct": 0.15},
+    "LTC": {"arm_delay_min": 60},
+    "ZZZ": {"rsi_tf": "7h"},
+})
+importlib.reload(config)
+
+check("per-coin rsi_tf", config.rsi_tf("TAO") == "6h" and config.rsi_tf("AVAX") == "1h")
+check("rsi_tf falls back to the global when unset", config.rsi_tf("LTC") == config.RSI_TF)
+check("an unknown rsi_tf falls back instead of fetching nothing",
+      config.rsi_tf("ZZZ") == config.RSI_TF)
+check("per-coin rsi_len", config.rsi_len("XLM") == 5 and config.rsi_len("AVAX") == 13)
+check("rsi_len defaults to the global", config.rsi_len("HYPE") == config.RSI_LEN)
+check("per-coin signal_venue",
+      config.signal_venue("HYPE") == "bybit" and config.signal_venue("CRV") == "okx")
+check("signal_venue defaults to hyperliquid", config.signal_venue("SUI") == "hyperliquid")
+check("bar_seconds follows the coin's own timeframe",
+      config.bar_seconds("TAO") == 21600 and config.bar_seconds("AVAX") == 3600)
+check("AVAX inverted levels survive (long 71 > short 32)",
+      config.long_level("AVAX") == 71 and config.short_level("AVAX") == 32)
+check("XLM inverted levels survive (long 20 < short 55)",
+      config.long_level("XLM") == 20 and config.short_level("XLM") == 55)
+check("explicit arm_delay_min still wins",
+      config.arm_delay_sec("TAO") == 1440 * 60 and config.arm_delay_sec("LTC") == 3600)
+
+# a coin with a per-coin timeframe and NO explicit delay must inherit one bar of
+# its OWN timeframe, not the global 4h
+os.environ["COIN_PARAMS"] = _json.dumps({"FOO": {"rsi_tf": "1h"}})
+importlib.reload(config)
+check("arm delay defaults to ONE bar of the coin's own timeframe",
+      config.arm_delay_sec("FOO") == config.TRAIL_ARM_DELAY_BARS * 3600)
+
+print("\n[5] intervals the venue does not serve are rolled up")
+import hl_client                                # noqa: E402
+step6 = 6 * 3600 * 1000
+check("6h is not native to Hyperliquid", "6h" not in hl_client._HL_NATIVE_TF)
+check("2h is the largest native divisor of 6h",
+      hl_client._divisor_tf(step6, hl_client.HLClient._INTERVAL_MS) == "2h")
+base = 2 * 3600 * 1000
+fine = [{"t": base * i, "T": base * (i + 1), "o": 10.0 + i, "h": 20.0 + i,
+         "l": 5.0 - i, "c": 15.0 + i, "v": 1.0} for i in range(6)]
+rolled = hl_client._roll_up(fine, step6)
+check("six 2h bars roll up into two 6h bars", len(rolled) == 2)
+check("buckets align to the 6h UTC boundary",
+      all(b["t"] % step6 == 0 for b in rolled))
+check("open is the FIRST open, close the LAST close",
+      rolled[0]["o"] == fine[0]["o"] and rolled[0]["c"] == fine[2]["c"])
+check("high/low span the whole bucket",
+      rolled[0]["h"] == max(f["h"] for f in fine[:3])
+      and rolled[0]["l"] == min(f["l"] for f in fine[:3]))
+check("volume sums", rolled[0]["v"] == 3.0)
+
+print("\n[6] the signal feed routes per coin")
+import feeds                                    # noqa: E402
+check("binance symbol mapping", feeds._sym("binance", "SOL") == "SOLUSDT")
+check("kPEPE maps to the 1000x ticker",
+      feeds._sym("binance", "KPEPE") == "1000PEPEUSDT")
+check("okx uses swap instIds", feeds._sym("okx", "CRV") == "CRV-USDT-SWAP")
+
+
+class _StubHL:
+    def __init__(self): self.calls = []
+
+    def fetch_candles(self, coin, interval, limit):
+        self.calls.append((coin, interval, limit))
+        return [{"t": 0, "T": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}]
+
+
+stub = _StubHL()
+feeds.fetch_candles("hyperliquid", "SOL", "4h", 200, hl_client=stub)
+check("hyperliquid routes to the client the worker already holds",
+      stub.calls == [("SOL", "4h", 200)])
+feeds.fetch_candles("something-else", "SOL", "4h", 200, hl_client=stub)
+check("an unknown venue falls back rather than failing", len(stub.calls) == 2)
+
+feeds._LAST_GOOD[("binance", "SOL", "4h")] = [{"t": 1, "T": 2, "o": 1, "h": 1,
+                                               "l": 1, "c": 1, "v": 0}]
+_real = feeds._FETCH["binance"]
+feeds._FETCH["binance"] = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+got = feeds.fetch_candles("binance", "SOL", "4h", 200)
+feeds._FETCH["binance"] = _real
+check("a feed outage serves the last good series, not an empty one", len(got) == 1)
+
 print(f"\n==== {PASS} passed, {FAIL} failed ====")
 sys.exit(1 if FAIL else 0)

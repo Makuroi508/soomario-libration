@@ -125,7 +125,7 @@ def _parse_arm_shadows(raw):
             else:
                 out.append((None, float(part)))       # None = use the live width
         except ValueError:
-            print(f"⚠ SHADOW_ARM_DELAYS: ignoring unparseable entry {part!r}")
+            print(f"WARNING SHADOW_ARM_DELAYS: ignoring unparseable entry {part!r}")
     return out
 
 
@@ -149,6 +149,8 @@ REPORT_TOKEN = os.getenv("REPORT_TOKEN", "").strip()
 
 # ─── Frozen strategy params (walk-forward validated) ────────────
 RSI_LEN       = _i("RSI_LEN", 14)
+# Default candle source for signals. Per-coin override: COIN_PARAMS signal_venue.
+SIGNAL_VENUE  = os.getenv("SIGNAL_VENUE", "hyperliquid").strip().lower()
 RSI_TF        = os.getenv("RSI_TF", "4h")
 LONG_LEVEL    = _f("LONG_LEVEL", 50)     # crossover up  -> long
 SHORT_LEVEL   = _f("SHORT_LEVEL", 40)    # crossunder down -> short
@@ -166,8 +168,9 @@ TRAIL_PCT     = _f("TRAIL_PCT", 0.55)    # activate +0.55%, trail 0.55% behind p
 # either): a 10% stop almost never fires inside one 4h bar in backtest, and
 # live it is the only protection against a crash while the trail is unarmed.
 TRAIL_ARM_DELAY_BARS = _i("TRAIL_ARM_DELAY_BARS", 1)
-_TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-               "1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800, "1d": 86400}
+_TF_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+               "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800,
+               "12h": 43200, "1d": 86400}
 BAR_SECONDS = _TF_SECONDS.get(RSI_TF, 14400)
 TRAIL_ARM_DELAY_SEC = TRAIL_ARM_DELAY_BARS * BAR_SECONDS
 
@@ -215,7 +218,7 @@ try:
     COIN_PARAMS = {str(k).upper(): dict(v) for k, v in
                    _json.loads(os.getenv("COIN_PARAMS", _COIN_PARAMS_DEFAULT) or "{}").items()}
 except (ValueError, TypeError, AttributeError):
-    print("⚠ COIN_PARAMS is not valid JSON -- ignoring all per-coin overrides")
+    print("WARNING COIN_PARAMS is not valid JSON -- ignoring all per-coin overrides")
     COIN_PARAMS = {}
 
 
@@ -239,7 +242,42 @@ def arm_delay_sec(coin):
             return float(ov) * 60.0
         except (TypeError, ValueError):
             pass
-    return TRAIL_ARM_DELAY_SEC
+    # No explicit override: one bar of THIS coin's timeframe, not the global
+    # one, or a coin on a 1h RSI would inherit a 4h arming delay.
+    return TRAIL_ARM_DELAY_BARS * bar_seconds(coin)
+
+def rsi_tf(coin) -> str:
+    """Per-coin RSI timeframe. A STRING, so it cannot go through _coin_param,
+    which casts to float. An interval the table does not know falls back to the
+    global rather than silently fetching nothing."""
+    ov = COIN_PARAMS.get(str(coin).upper(), {}).get("rsi_tf")
+    if ov and str(ov) in _TF_SECONDS:
+        return str(ov)
+    if ov:
+        print(f"WARNING {coin}: unknown rsi_tf {ov!r} -- using the global {RSI_TF}")
+    return RSI_TF
+
+
+def signal_venue(coin) -> str:
+    """Which venue's candles this coin's SIGNAL is computed from.
+
+    A backtest is tied to the price series it ran on, and this book's runs were
+    charted across Binance, Bybit and OKX. Default "hyperliquid" keeps the
+    pre-existing behaviour for anything not explicitly pinned.
+    """
+    v = COIN_PARAMS.get(str(coin).upper(), {}).get("signal_venue")
+    return str(v).strip().lower() if v else SIGNAL_VENUE
+
+
+def rsi_len(coin) -> int:
+    n = int(_coin_param(coin, "rsi_len", RSI_LEN))
+    return n if n >= 2 else RSI_LEN
+
+
+def bar_seconds(coin) -> int:
+    """Length of ONE bar on this coin's own RSI timeframe."""
+    return _TF_SECONDS.get(rsi_tf(coin), BAR_SECONDS)
+
 
 def short_level(coin):   return _coin_param(coin, "short_level", SHORT_LEVEL)
 def trail_pct(coin):     return _coin_param(coin, "trail_pct", TRAIL_PCT)
