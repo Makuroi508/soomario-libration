@@ -532,6 +532,12 @@ class FoxifyClient:
         """
         return f"native:{short_name(symbol)}:{'long' if is_long else 'short'}"
 
+    # modify_stop is a deliberate no-op here, so it ALWAYS returns the old id.
+    # exit_manager reads this to tell that apart from a venue that tried to move
+    # the trigger and failed; without it the trail would never be recorded and
+    # the software backstop -- which IS the trail on Kitsune -- would never fire.
+    moves_native_stop = False
+
     def modify_stop(self, symbol: str, is_long: bool, size: float,
                     old_oid, new_stop_px: float) -> Optional[str]:
         """Local no-op. The native sl stays parked at the hard stop.

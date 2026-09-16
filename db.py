@@ -112,6 +112,11 @@ class DB:
             # trail never armed. NULL = a plain trail-width shadow.
             ("shadow_state", "stale_h", "REAL"),
             ("shadow_trades", "stale_h", "REAL"),
+            # A shadow may also differ by ARMING DELAY. NULL on legacy rows,
+            # which armed immediately -- so they must never be pooled with rows
+            # written after the delay became explicit.
+            ("shadow_state", "arm_delay_h", "REAL"),
+            ("shadow_trades", "arm_delay_h", "REAL"),
         ]
         for table, col, typ in adds:
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -357,11 +362,12 @@ class DB:
 
     # ── shadow trail A/B (counterfactual; never trades) ────────
     def open_shadow(self, coin, trail_pct, side, entry, qty, hard_stop, opened_at,
-                    stale_h=None):
+                    stale_h=None, arm_delay_h=None):
         self._conn.execute(
             "INSERT INTO shadow_state (coin, trail_pct, side, entry, qty, peak, active, "
-            "hard_stop, opened_at, stale_h) VALUES (?,?,?,?,?,?,0,?,?,?)",
-            (coin.upper(), trail_pct, side, entry, qty, entry, hard_stop, opened_at, stale_h),
+            "hard_stop, opened_at, stale_h, arm_delay_h) VALUES (?,?,?,?,?,?,0,?,?,?,?)",
+            (coin.upper(), trail_pct, side, entry, qty, entry, hard_stop, opened_at,
+             stale_h, arm_delay_h),
         )
         self._conn.commit()
 
@@ -388,10 +394,11 @@ class DB:
         self._conn.execute(
             "INSERT INTO shadow_trades (coin, side, trail_pct, entry, shadow_exit, "
             "shadow_ret_pct, shadow_net_pct, exit_reason, opened_at, shadow_closed_at, "
-            "stale_h) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "stale_h, arm_delay_h) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["coin"], row["side"], row["trail_pct"], row["entry"], shadow_exit,
              round(ret_pct, 4), round(net_pct, 4), reason, opened_at, iso(),
-             row["stale_h"] if "stale_h" in row.keys() else None),
+             row["stale_h"] if "stale_h" in row.keys() else None,
+             row["arm_delay_h"] if "arm_delay_h" in row.keys() else None),
         )
         self._conn.execute("DELETE FROM shadow_state WHERE id=?", (sid,))
         self._conn.commit()
@@ -409,22 +416,28 @@ class DB:
         # stale-exit shadow would be silently averaged into the plain trail it
         # is being compared against.
         rows = self._conn.execute(
-            "SELECT DISTINCT trail_pct, stale_h FROM shadow_trades").fetchall()
-        for tp, sh in rows:
-            if sh is None:
-                nets = [r[0] for r in self._conn.execute(
-                    "SELECT shadow_net_pct FROM shadow_trades "
-                    "WHERE trail_pct=? AND stale_h IS NULL", (tp,)).fetchall()]
-                key = tp
-            else:
-                nets = [r[0] for r in self._conn.execute(
-                    "SELECT shadow_net_pct FROM shadow_trades "
-                    "WHERE trail_pct=? AND stale_h=?", (tp, sh)).fetchall()]
-                key = f"{tp}+stale{sh:g}h"
+            "SELECT DISTINCT trail_pct, stale_h, arm_delay_h FROM shadow_trades").fetchall()
+        for tp, sh, ad in rows:
+            # NULL columns need `IS NULL`, not `= ?`, or the group silently
+            # returns nothing and the whole rule disappears from the panel.
+            where = ["trail_pct=?"]
+            args = [tp]
+            for col, val in (("stale_h", sh), ("arm_delay_h", ad)):
+                if val is None:
+                    where.append(f"{col} IS NULL")
+                else:
+                    where.append(f"{col}=?")
+                    args.append(val)
+            nets = [r[0] for r in self._conn.execute(
+                "SELECT shadow_net_pct FROM shadow_trades WHERE " + " AND ".join(where),
+                tuple(args)).fetchall()]
             if not nets:
                 continue
+            key = tp if (sh is None and ad is None) else (
+                f"{tp}" + (f"+stale{sh:g}h" if sh is not None else "")
+                + (f"+arm{ad:g}h" if ad is not None else ""))
             out[key] = {"n": len(nets), "median_net_pct": _median(nets),
-                        "trail_pct": tp, "stale_h": sh,
+                        "trail_pct": tp, "stale_h": sh, "arm_delay_h": ad,
                         "win_rate": round(sum(1 for x in nets if x > 0) / len(nets) * 100, 2)}
         return out
 

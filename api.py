@@ -235,6 +235,7 @@ def api_shadow():
         shadows.append({"label": str(key),
                         "trail_pct": sm.get("trail_pct", key),
                         "stale_h": sm.get("stale_h"),
+                        "arm_delay_h": sm.get("arm_delay_h"),
                         "n": sm["n"],
                         "median_net_pct": round(sm["median_net_pct"], 4)
                         if sm["median_net_pct"] is not None else None,

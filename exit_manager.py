@@ -25,6 +25,9 @@ from config import TRADE_LOG, short_name
 
 logger = logging.getLogger("exit_manager")
 EPS = 1e-9
+# Stop ids that mean "no exchange trigger exists; the software backstop owns
+# this exit". Never cancelled, and never treated as a failed stop move.
+_SOFT_STOP_IDS = ("paper", "backstop")
 # How many CONSECUTIVE confirmed-absent reconcile reads before booking a
 # genuinely-gone position at its stop estimate (when the actual fill never
 # indexes). Only reached on successful reads — failed reads return None upstream.
@@ -45,6 +48,7 @@ class ExitManager:
         self._gone_streak = {}      # coin -> consecutive 'absent w/o fill' reconcile passes
         self._orphan_warned = {}    # coin -> qty we've already alarmed about
         self._seen_live = set()     # coins the exchange has CONFIRMED open at least once
+        self._stop_stuck = {}       # coin -> consecutive failed trail-stop moves
 
     # ── per-position trailing management ───────────────────────
     def manage(self, pos: dict, price: float):
@@ -238,11 +242,32 @@ class ExitManager:
         if config.PAPER:
             updates["trail_stop"] = new_stop
             return
+        old_id = pos.get("hard_stop_id")
         new_oid = self.client.modify_stop(
-            pos["coin"], pos["side"] == "long", qty, pos["hard_stop_id"], new_stop)
+            pos["coin"], pos["side"] == "long", qty, old_id, new_stop)
+
+        # Recording a level the exchange never accepted is how the book and the
+        # venue drift apart. Every client signals a failed move the same way:
+        # None, or the SAME id handed back ("modify_stop kept old stop"). The
+        # ratchet only fires on a strictly better level, so a level written here
+        # is never retried -- the stale trigger would sit at the old, looser
+        # price for the life of the position while the dashboard showed the new
+        # one. Not recording it leaves `cur` at the last CONFIRMED level, so the
+        # next tick recomputes the same move and tries again.
+        #
+        # The exception is a venue where modify_stop is a deliberate no-op and
+        # the SOFTWARE backstop owns the trail (Foxify always; Bulk with
+        # BULK_NATIVE_STOPS=0, via its sentinel). There the stop level lives
+        # only in trail_stop, so NOT recording it would disable the trail
+        # completely -- the failure mode this change exists to prevent.
+        soft = (str(new_oid) in _SOFT_STOP_IDS
+                or not getattr(self.client, "moves_native_stop", True))
+        if not new_oid or (not soft and str(new_oid) == str(old_id)):
+            self._warn_stop_stuck(pos["coin"], new_stop)
+            return
         updates["trail_stop"] = new_stop
-        if new_oid:
-            updates["hard_stop_id"] = str(new_oid)
+        updates["hard_stop_id"] = str(new_oid)
+        self._stop_stuck.pop(pos["coin"], None)
         # Only log when the printed value actually changes. On low-priced coins
         # (ENA ~$0.08, kPEPE ~$0.003) a 0.55% band ratchets by amounts invisible
         # at 6dp, so every tick emitted an identical-looking line. The move still
@@ -253,6 +278,21 @@ class ExitManager:
                 self._last_trail_shown = {}
             self._last_trail_shown[pos["coin"]] = shown
             logger.info(f"    ↗ trail stop {pos['coin']} -> {shown}")
+
+    def _warn_stop_stuck(self, coin, wanted):
+        """A trail that cannot move is a real risk, but it retries every tick --
+        so log the first one and then only every 25th, or a stuck stop would
+        drown the log it needs to be visible in."""
+        n = self._stop_stuck.get(coin, 0) + 1
+        self._stop_stuck[coin] = n
+        if n == 1 or n % 25 == 0:
+            logger.warning(f"⚠️  {coin}: could not move the resting stop to "
+                           f"${wanted:.6f} (attempt {n}) - the venue still holds the "
+                           f"previous trigger. Book keeps the last CONFIRMED level.")
+        if n == 1:
+            tg_notify(f"⚠️ {coin}: the trailing stop could NOT be moved on the "
+                      f"exchange. The book is keeping the last confirmed level and will "
+                      f"retry; check the venue if this repeats.", level="warn")
 
     def _paper_check_stop(self, pos, price):
         is_long = pos["side"] == "long"

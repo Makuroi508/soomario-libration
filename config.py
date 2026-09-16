@@ -104,6 +104,32 @@ SHADOW_TRAILS = [float(x) for x in os.getenv("SHADOW_TRAILS", "0.3,0.4").split("
 # is shadowed rather than shipped - backtest says it loses, but a 0.55% trail
 # cannot be backtested honestly on candles, so live fills are the arbiter.
 SHADOW_STALE_HOURS = [float(x) for x in os.getenv("SHADOW_STALE_HOURS", "").split(",") if x.strip()]
+
+
+# Exit-RULE shadows on the ARMING DELAY -- the knob that changed on 2026-08-16
+# and the one no backtest can settle honestly, because a 0.55% trail cannot be
+# resolved on the 4h candles the delay is measured in.
+#   "0"        -> the coin's LIVE trail width, but arming immediately
+#   "0.55:0"   -> trail 0.55% arming immediately (the pre-2026-08-16 config)
+# Each entry is `delay_hours` or `trail_pct:delay_hours`. Off by default.
+def _parse_arm_shadows(raw):
+    out = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if ":" in part:
+                tp, d = part.split(":", 1)
+                out.append((float(tp), float(d)))
+            else:
+                out.append((None, float(part)))       # None = use the live width
+        except ValueError:
+            print(f"⚠ SHADOW_ARM_DELAYS: ignoring unparseable entry {part!r}")
+    return out
+
+
+SHADOW_ARM_DELAYS = _parse_arm_shadows(os.getenv("SHADOW_ARM_DELAYS", ""))
 # Round-trip friction charged to shadow exits so they're a FAIR comparison.
 # Placeholder = backtest assumption; update from the live realized-friction KPI
 # (or wire userFills) once Phase 1 produces real numbers. Spec §7b.
