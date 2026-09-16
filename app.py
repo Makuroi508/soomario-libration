@@ -359,6 +359,21 @@ def run_worker():
         tg_notify("⚠️ Max-drawdown halt manually cleared. Trading may resume.", level="warn")
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
+    # One-shot import of trades a previous bot closed on this same account, so
+    # the ledger, the static-drawdown equity and the dashboard start from the
+    # account's real history instead of from today. Idempotent: rows already in
+    # the ledger are skipped, so leaving the var set is harmless, but remove it.
+    _ij = (os.getenv("IMPORT_JOURNAL_URL") or "").strip()
+    if _ij:
+        import journal_import
+        try:
+            added = journal_import.run(db, _ij, coin=os.getenv("IMPORT_JOURNAL_COIN", "HYPE"))
+            if added:
+                pm.ensure_seeded()                # resync equity = inception + realized
+                _rebuild_logs_from_ledger(db)
+            logger.info(f"📥 journal import: {added} trade(s) added - REMOVE IMPORT_JOURNAL_URL")
+        except Exception as e:
+            logger.exception(f"📥 journal import FAILED ({e}) - ledger left untouched")
     if os.getenv("REBUILD_CURVE") == "1":
         _rebuild_logs_from_ledger(db)
     # Ledger reconciliation against the VENUE's own trade history — the repair

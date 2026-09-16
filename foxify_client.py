@@ -34,6 +34,23 @@ Consequences that shape this file:
   * No candles or prices. Same as Propr: market data is read from Hyperliquid's
     public API through hl_reader. Execution venue and data venue are separate.
 
+  * Execution is ASYNCHRONOUS, and confirmation is TWO-STAGE. /signals/trade
+    returns {accepted: true} meaning QUEUED, and /signals/trade-status can sit
+    on "pending" past any reasonable deadline. soomario-prop, which ran this
+    account first, hit both failure modes:
+      2026-08-10  an entry stayed pending, was reported as sent, never filled
+      2026-07-31  a close was reported filled while the venue still held it
+    So every send is settled like this:
+      1. poll /signals/trade-status to a terminal state      (FOXIFY_STATUS_SEC)
+      2. if inconclusive, poll /signals/positions for the position to appear
+         (open) or disappear (close)                         (FOXIFY_CONFIRM_SEC)
+    Only a confirmed send is reported as filled. An unconfirmed OPEN returns
+    None (a missed entry costs one trade; a phantom entry costs every trade
+    until someone notices, and if it fills late reconcile's orphan check
+    adopts it). An unconfirmed CLOSE returns None so the position stays in the
+    book and the next tick retries -- the retry is reduce-only, so a close that
+    did land late cannot flip the account.
+
   * SIZE IS ALWAYS SENT AS EXPLICIT USD NOTIONAL. Never as a percentage string.
     Kitsune computes percentages against availableBalance (idle margin), which
     shrinks as the book fills — the tenth concurrent position would be sized
@@ -116,7 +133,10 @@ class FoxifyClient:
     def __init__(self, hl_reader=None):
         self.signal_id = os.getenv("FOXIFY_SIGNAL_ID", "").strip()
         self.passphrase = os.getenv("FOXIFY_PASSPHRASE", "").strip()
-        self.leverage = _f(os.getenv("FOXIFY_LEVERAGE", "2"), 2.0)
+        # position_manager overrides this per entry via set_leverage(LEVERAGE);
+        # the default only matters if something sends without it, so it is the
+        # conservative one soomario-prop ran.
+        self.leverage = _f(os.getenv("FOXIFY_LEVERAGE", "1"), 1.0)
         self.min_notional = _f(os.getenv("FOXIFY_MIN_NOTIONAL", "10"), 10.0)
         # Tier max drawdown, as the venue states it. Surfaced through
         # challenge_rules() so an env typo can never loosen the guard.
@@ -125,6 +145,16 @@ class FoxifyClient:
         # whether currentBalance includes unrealised PnL; this is the escape
         # hatch if it turns out it does not.
         self.add_upnl = os.getenv("FOXIFY_EQUITY_ADD_UPNL", "0").strip() in ("1", "true", "yes")
+        # Confirmation budget per send, both stages. See the module docstring.
+        self.status_sec = _f(os.getenv("FOXIFY_STATUS_SEC", "20"), 20.0)
+        self.confirm_sec = _f(os.getenv("FOXIFY_CONFIRM_SEC", "30"), 30.0)
+        # The challenge's FUNDED balance. Kitsune does not report it, and the
+        # static max-drawdown floor is measured from it, not from whatever the
+        # account happened to be worth when this service first booted. Without
+        # the pin a fresh database on an account sitting at $484 anchors the
+        # floor at $387 while Foxify's real floor is $400.
+        _sb = _f(os.getenv("FOXIFY_START_BALANCE", "0"), 0.0)
+        self.pinned_start_balance = _sb if _sb > 0 else None
 
         # Symbol translation, both directions. Env entries override/extend the
         # defaults so a listing change never needs a code deploy.
@@ -141,7 +171,7 @@ class FoxifyClient:
         self.asset_meta = {}
         self.last_open_error = None
         self.last_error = None
-        self._initial_balance = None
+        self._initial_balance = self.pinned_start_balance
 
         # Market data from HL, read-only. Imported lazily so a missing HL key
         # can never take the Foxify service down at import time.
@@ -202,7 +232,10 @@ class FoxifyClient:
         # level DOWN with it. Leave it None; the durable starting balance is
         # account.inception, captured once and persisted, which is also what
         # check_max_dd anchors a static drawdown to.
-        self._initial_balance = None
+        self._initial_balance = self.pinned_start_balance
+        if self.pinned_start_balance:
+            logger.info(f"Foxify start balance pinned at ${self.pinned_start_balance:.2f} "
+                        f"(FOXIFY_START_BALANCE) - static drawdown anchors here")
         logger.info(
             f"✅ Foxify signal {self.signal_id} | equity ${_f(bal.get('currentBalance')):.2f} "
             f"| available ${_f(bal.get('availableBalance')):.2f} "
@@ -357,7 +390,8 @@ class FoxifyClient:
         return None
 
     # ── orders ──────────────────────────────────────────────────
-    def _trade_status(self, request_id: str, timeout: float = 10.0, interval: float = 1.0):
+    def _trade_status(self, request_id: str, timeout: Optional[float] = None,
+                      interval: float = 1.0):
         """Poll /signals/trade-status until the request reaches a terminal state.
 
         This endpoint is absent from the published gist but is the only way to
@@ -376,7 +410,7 @@ class FoxifyClient:
         may still be in flight, so the caller should fall back to reading
         /signals/positions rather than assuming either outcome.
         """
-        deadline = time.time() + timeout
+        deadline = time.time() + (self.status_sec if timeout is None else timeout)
         last = None
         while time.time() < deadline:
             d = self._post("/signals/trade-status", {"requestId": request_id})
@@ -397,26 +431,63 @@ class FoxifyClient:
             time.sleep(interval)
         return None, f"status poll timed out (last={str((last or {}).get('status', '?'))})"
 
-    def _await_fill(self, asset: str, timeout: float = 8.0, interval: float = 1.5):
-        """Kitsune executes ASYNCHRONOUSLY.
+    def _find_position(self, asset: str):
+        """(read_ok, position-or-None). A failed read is not an answer."""
+        live = self.get_positions()
+        if live is None:
+            return False, None
+        for p in live:
+            if p.get("coin") == asset:
+                return True, p
+        return True, None
 
-        /signals/trade returns {accepted: true, async: true, requestId: ...} --
-        that means QUEUED, not filled, and the response carries no fill price.
-        There is also a /signals/trade-status endpoint that is absent from the
-        published docs, so it is deliberately not relied on here; polling
-        /signals/positions uses a shape we have verified live.
+    def _confirm_via_positions(self, asset: str, expect_open: bool,
+                               timeout: Optional[float] = None, interval: float = 2.0):
+        """Stage 2: settle an inconclusive trade-status against venue truth.
 
-        Bounded on purpose: with 10 concurrent entries a long wait would stall
-        the whole tick. On timeout the caller still books the entry and the
-        normal reconcile path corrects the fill, exactly as it does on Propr.
+        /signals/positions is the one endpoint that cannot lie about whether a
+        position exists. A failed read keeps polling to the deadline rather
+        than being taken as confirmation either way.
+
+        Returns (confirmed, position). position is the live row when an open
+        is confirmed, else None.
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.time() + (self.confirm_sec if timeout is None else timeout)
+        while True:
+            ok, pos = self._find_position(asset)
+            if ok and (pos is not None) == expect_open:
+                return True, pos
+            if time.time() >= deadline:
+                return False, None
             time.sleep(interval)
-            for p in (self.get_positions() or []):
-                if p.get("coin") == asset:
-                    return p
-        return None
+
+    def _settle(self, res: dict, asset: str, expect_open: bool, what: str):
+        """Run both confirmation stages on an accepted send.
+
+        Returns (executed, position-or-None, detail). executed=False covers
+        both a confirmed failure and a send nobody could confirm.
+        """
+        rid = res.get("requestId")
+        if rid:
+            ok, detail = self._trade_status(rid)
+        else:
+            ok, detail = None, "no requestId in /signals/trade response"
+        if ok is False:
+            return False, None, f"execution failed: {detail}"
+        if ok is True:
+            if not expect_open:
+                return True, None, detail
+            # Terminal success. Read the real entry back; a short wait is
+            # enough because the venue already says it executed.
+            _, pos = self._confirm_via_positions(asset, True, timeout=8.0, interval=1.5)
+            return True, pos, detail
+        logger.warning(f"⚠️  {what}: {detail} - confirming against /signals/positions")
+        confirmed, pos = self._confirm_via_positions(asset, expect_open)
+        if not confirmed:
+            return False, None, (f"UNCONFIRMED after {self.status_sec + self.confirm_sec:.0f}s "
+                                 f"({detail}) - treating as not executed")
+        logger.info(f"{what} confirmed via /signals/positions")
+        return True, pos, "confirmed via positions"
 
     def market_open(self, symbol: str, is_buy: bool, notional_usd: float,
                     current_price: Optional[float] = None) -> Optional[dict]:
@@ -452,32 +523,30 @@ class FoxifyClient:
             self.last_open_error = self.last_error or "trade rejected"
             return None
 
-        # The trade was QUEUED, not filled. Confirm it actually executed before
-        # the caller writes anything to the DB: a confirmed failure must return
-        # None so no phantom position is booked.
-        rid = res.get("requestId")
-        if rid:
-            ok, detail = self._trade_status(rid)
-            if ok is False:
-                self.last_open_error = f"execution failed: {detail}"
-                logger.error(f"❌ {asset} ({wire}) rejected downstream: {detail}")
-                return None
-            if ok is None:
-                logger.warning(f"⚠️  {asset}: {detail} — verifying via positions")
+        # The trade was QUEUED, not filled. Nothing is booked until one of the
+        # two stages proves it executed.
+        side = "long" if is_buy else "short"
+        executed, filled, detail = self._settle(res, asset, True, f"open {side} {asset}")
+        if not executed:
+            self.last_open_error = detail
+            logger.error(f"❌ {asset} ({wire}) open not booked: {detail}")
+            return None
 
         # Read back the real entry price and size; the stop and the trail are
         # both computed from this number, so a pre-trade guess is not good enough.
-        filled = self._await_fill(asset)
         if filled:
             fill_px = _f(filled.get("entryPx")) or px
             size = abs(_f(filled.get("szi"))) or self._round(symbol, notional_usd / px)
-            logger.info(f"✅ {asset} open {'long' if is_buy else 'short'} "
-                        f"{size} @ ${fill_px:.6f} (req ${notional_usd:.2f})")
+            logger.info(f"✅ {asset} open {side} {size} @ ${fill_px:.6f} "
+                        f"(req ${notional_usd:.2f})")
         else:
+            # The venue reported the trade COMPLETED but the position read has
+            # not caught up. The execution is not in doubt, so book at the mark;
+            # reconcile corrects entry and size from the next read.
             fill_px = px
             size = self._round(symbol, notional_usd / px)
-            logger.warning(f"⚠️  {asset} open accepted but no position after "
-                           f"8s — booking at mark ${px:.6f}; reconcile will correct")
+            logger.warning(f"⚠️  {asset} open completed but not yet visible in positions "
+                           f"- booking at mark ${px:.6f}; reconcile will correct")
         return {"filled": True, "avg_price": fill_px, "total_size": size,
                 "size": size, "oid": res.get("requestId"), "raw": res}
 
@@ -508,15 +577,14 @@ class FoxifyClient:
         })
         if not res:
             return None
-        rid = res.get("requestId")
-        if rid:
-            ok, detail = self._trade_status(rid)
-            if ok is False:
-                # Returning None leaves the position open in the DB, which is
-                # correct: it IS still open, and the next tick retries. Claiming
-                # a close here would strand real exposure the bot no longer tracks.
-                logger.error(f"❌ {asset} ({wire}) close rejected: {detail}")
-                return None
+        executed, _, detail = self._settle(res, asset, False, f"close {asset}")
+        if not executed:
+            # Returning None leaves the position open in the book, correct until
+            # proven otherwise, and the next tick retries. Claiming a close here
+            # is the 2026-07-31 failure: the book drops a position the venue
+            # still holds, and nothing manages it after.
+            logger.error(f"❌ {asset} ({wire}) close not booked: {detail}")
+            return None
         logger.info(f"✅ {asset} closed ${notional:.2f} (~{size}) @ ~${px:.6f}")
         return {"filled": True, "avg_price": px, "total_size": size,
                 "size": size, "oid": None, "raw": res}

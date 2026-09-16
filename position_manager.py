@@ -95,6 +95,17 @@ class PositionManager:
         exchange — so deposits/withdrawals can't move the curve. PAPER seeds
         PAPER_START_EQUITY; LIVE captures the wallet value at go-live."""
         acct = self.db.account()
+        # A venue that states its funded balance (Foxify via FOXIFY_START_BALANCE)
+        # overrides whatever inception was captured. The static drawdown floor
+        # is measured from it, so an anchor taken at boot-time equity puts the
+        # guard's floor below the venue's real one.
+        pinned = None if config.PAPER else getattr(self.client, "pinned_start_balance", None)
+        if pinned and acct["equity"] and acct["equity"] > 0 \
+                and abs((acct.get("inception") or 0.0) - pinned) > 0.005:
+            logger.warning(f"📓 inception pinned to the venue start balance ${pinned:.2f} "
+                           f"(was ${acct.get('inception') or 0.0:.2f})")
+            self.db.set_account(inception=pinned)
+            acct = self.db.account()
         if acct["equity"] and acct["equity"] > 0:
             # Existing account: backfill inception ONCE if it's missing. Older
             # rows predate the inception column, so it reads NULL and the
@@ -122,10 +133,18 @@ class PositionManager:
                             f"(was ${acct['equity']:.2f}; drift corrected)")
             return
         base = config.PAPER_START_EQUITY if config.PAPER else (self.client.get_equity() or 0.0)
-        if base > 0:
-            self.db.set_account(equity=base, daily_baseline=base, daily_halt=0,
+        day_base = base
+        if pinned:
+            # Inception is the funded balance, but TODAY's baseline must be what
+            # the account is worth now - the daily guard measures venue equity
+            # against it, and seeding it at the start balance reads an account
+            # already down 3% as a 3% loss on its first day.
+            base = pinned
+        if base > 0 and day_base > 0:
+            self.db.set_account(equity=base, daily_baseline=day_base, daily_halt=0,
                                 last_reset=utc_date_str(), inception=base, inception_ts=iso())
-            tag = "paper" if config.PAPER else "live starting capital"
+            tag = "paper" if config.PAPER else (
+                "pinned venue start balance" if pinned else "live starting capital")
             logger.info(f"📓 baseline captured: ${base:.2f} ({tag})")
 
     def equity(self) -> float:
