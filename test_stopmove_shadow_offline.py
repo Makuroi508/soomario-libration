@@ -270,5 +270,37 @@ got = feeds.fetch_candles("binance", "SOL", "4h", 200)
 feeds._FETCH["binance"] = _real
 check("a feed outage serves the last good series, not an empty one", len(got) == 1)
 
+
+print("\n[7] per-coin size_mult")
+os.environ["WATCH"] = "SOL,LINK"
+os.environ["WATCH_SIZE_MULT"] = "0.5"
+os.environ["COIN_PARAMS"] = _json.dumps({
+    "HYPE": {"size_mult": 0.5},
+    "SOL": {"size_mult": 0.3},          # overrides WATCH for this coin
+    "BAD": {"size_mult": 0},            # must be ignored, not honoured
+    "WORSE": {"size_mult": "abc"},
+})
+importlib.reload(config)
+check("COIN_PARAMS size_mult applies to a non-WATCH coin", config.size_mult("HYPE") == 0.5)
+check("COIN_PARAMS size_mult OVERRIDES the WATCH multiplier", config.size_mult("SOL") == 0.3)
+check("a WATCH coin with no override still uses WATCH_SIZE_MULT",
+      config.size_mult("LINK") == 0.5)
+check("an unlisted, unwatched coin is still 1.0", config.size_mult("KPEPE") == 1.0)
+check("size_mult 0 is ignored, not honoured", config.size_mult("BAD") == 1.0)
+check("an unparseable size_mult is ignored", config.size_mult("WORSE") == 1.0)
+
+# the whole point: base size and the outlier move independently
+os.environ["COIN_PARAMS"] = _json.dumps({"HYPE": {"size_mult": 0.5}})
+os.environ["WATCH"] = ""
+os.environ["NOTIONAL_FRAC"] = "0.40"
+importlib.reload(config)
+eq = 10_000.0
+hype = config.NOTIONAL_FRAC * eq * config.size_mult("HYPE")
+other = config.NOTIONAL_FRAC * eq * config.size_mult("SOL")
+check("base 0.40 with HYPE at x0.5 -> HYPE 20% notional, others 40%",
+      abs(hype - 2000) < 1e-6 and abs(other - 4000) < 1e-6)
+check("so a HYPE 10% stop still costs 2.00% of equity",
+      abs(hype * 0.10 / eq * 100 - 2.0) < 1e-9)
+
 print(f"\n==== {PASS} passed, {FAIL} failed ====")
 sys.exit(1 if FAIL else 0)

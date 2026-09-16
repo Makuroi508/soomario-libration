@@ -328,7 +328,31 @@ COINS = _CORE_COINS + [w for w in WATCH_SET if w not in _CORE_COINS]
 
 
 def size_mult(coin: str) -> float:
-    """Per-coin notional multiplier: WATCH coins trade reduced, everything else 1.0."""
+    """Per-coin notional multiplier.
+
+    COIN_PARAMS size_mult wins; otherwise WATCH coins trade reduced and
+    everything else is 1.0. The explicit form exists because WATCH alone cannot
+    separate two things that pull against each other: how big the book runs, and
+    how much of it sits in one coin.
+
+    NOTIONAL_FRAC sizes every position off TOTAL equity -- position six is the
+    same size as position one, sizes do not taper as the book fills -- so
+    raising it to deploy more capital also raises the largest position, and the
+    largest position is what the daily-drawdown guard has to survive. With a
+    per-coin multiplier the base and the outlier move independently.
+
+    Zero or negative is ignored rather than honoured: it would silently stop a
+    coin trading, and COINS is the place to do that.
+    """
+    ov = COIN_PARAMS.get(str(coin).upper(), {}).get("size_mult")
+    if ov is not None:
+        try:
+            v = float(ov)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+        print(f"WARNING {coin}: ignoring size_mult {ov!r} (must be a positive number)")
     return WATCH_SIZE_MULT if coin.upper() in WATCH_SET else 1.0
 
 # ─── Timing ─────────────────────────────────────────────────────
