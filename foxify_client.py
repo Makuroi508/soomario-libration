@@ -51,10 +51,17 @@ Consequences that shape this file:
     book and the next tick retries -- the retry is reduce-only, so a close that
     did land late cannot flip the account.
 
-  * SIZE IS ALWAYS SENT AS EXPLICIT USD NOTIONAL. Never as a percentage string.
+  * SIZE IS ALWAYS SENT AS AN EXPLICIT USD AMOUNT. Never as a percentage string.
     Kitsune computes percentages against availableBalance (idle margin), which
     shrinks as the book fills — the tenth concurrent position would be sized
     off a much smaller base than the first, silently breaking equal weighting.
+
+  * On an ENTRY that amount is MARGIN: Kitsune multiplies `size` by `leverage`.
+    Measured on soom2 at 2x: SOL requested $22.16 filled 0.44 @ $99.88 ($43.95),
+    HYPE requested $22.02 filled 0.54 @ $81.18 ($43.84), and the venue's open
+    interest read $132 for three "$22" positions. So market_open sends
+    notional / leverage. Closes carry no leverage and are sent as the notional
+    being closed, reduce-only (verified on soom1 and soom2).
 """
 
 import logging
@@ -510,10 +517,12 @@ class FoxifyClient:
             logger.warning(f"⚠️  {asset}: {self.last_open_error}")
             return None
 
+        lev = self.leverage if self.leverage and self.leverage > 0 else 1.0
         res = self._post("/signals/trade", {
             "symbol": wire,
             "action": "buy" if is_buy else "sell",
-            "size": round(notional_usd, 2),      # explicit USD notional — never a percentage
+            # MARGIN in USD: Kitsune multiplies it by leverage (docstring).
+            "size": round(notional_usd / lev, 2),
             "leverage": self.leverage,
             "sl": config.HARD_STOP_PCT,          # native server-side disaster stop
             "reduceOnly": False,

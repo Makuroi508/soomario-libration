@@ -96,6 +96,12 @@ check("completed + visible -> booked at the venue entry", r and r["avg_price"] =
 check("  size read back from the venue", r and abs(r["total_size"] - 145.2 / 80.2) < 1e-9)
 check("  hard stop rides with the entry", v.sent[0].get("sl") == config.HARD_STOP_PCT)
 check("  leverage defaults to 1", v.sent[0].get("leverage") == 1.0)
+v = Kitsune("completed", [LONG])
+c2 = client(v)
+c2.set_leverage("HYPE", 2)
+c2.market_open("HYPE", True, 145.2, current_price=80.0)
+check("  at 2x the size sent is MARGIN (notional / 2)",
+      v.sent[0]["size"] == 72.6 and v.sent[0]["leverage"] == 2.0)
 
 c = client(Kitsune("failed", [[]]))
 check("failed downstream -> not booked", c.market_open("HYPE", True, 145.2, 80.0) is None)
