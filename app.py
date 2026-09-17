@@ -359,6 +359,19 @@ def run_worker():
         tg_notify("⚠️ Max-drawdown halt manually cleared. Trading may resume.", level="warn")
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
+    # The venue re-funded the account under the same credentials (a Foxify
+    # reset). Archive the previous account's trades so equity, sizing and the
+    # dashboard start from the new account. Idempotent; remove after one boot.
+    _lr = (os.getenv("LEDGER_RESET_AT") or "").strip()
+    if _lr:
+        import ledger_reset
+        try:
+            ledger_reset.run(db, _lr, getattr(hl, "pinned_start_balance", None))
+            pm.ensure_seeded()                    # equity = inception + realized
+            _rebuild_logs_from_ledger(db)
+            logger.info("🧹 ledger reset finished - REMOVE LEDGER_RESET_AT now")
+        except Exception as e:
+            logger.exception(f"🧹 ledger reset FAILED ({e}) - ledger left untouched")
     # One-shot import of trades a previous bot closed on this same account, so
     # the ledger, the static-drawdown equity and the dashboard start from the
     # account's real history instead of from today. Idempotent: rows already in

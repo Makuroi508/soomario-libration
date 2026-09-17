@@ -220,5 +220,48 @@ try:
 except ValueError:
     check("unknown shape rejected", True)
 
+print("\n5. ledger reset after a venue re-fund")
+import ledger_reset                            # noqa: E402
+
+db5 = fresh_db("reset.db")
+pm5 = PositionManager(client(Kitsune(equity=500.0), start=500), db5)
+pm5.ensure_seeded()
+
+
+def book(coin, entry, exit_, qty, closed):
+    db5.book_trade(dict(coin=coin, side="long", entry=entry, exit=exit_, qty=qty, fee=0.0,
+                        exit_reason="TRAIL", opened_at=closed, closed_at=closed))
+
+
+book("TAO", 100.0, 90.0, 5.0, "2026-08-09T00:23:05+00:00")      # old account: -50
+book("DOT", 1.0, 0.9, 100.0, "2026-08-10T08:23:14+00:00")       # old account: -10
+book("XMR", 10.0, 11.0, 10.0, "2026-08-22T03:06:35+00:00")      # new account: +10
+book("SOL", 100.0, 101.0, 2.0, "2026-09-17T09:56:59+00:00")     # new account: +2
+pm5.ensure_seeded()
+check("before: old losses sit in realized", abs(db5.realized_pnl() - (-48.0)) < 1e-9)
+r = ledger_reset.run(db5, "2026-08-15T00:00:00Z", 500.0)
+pm5.ensure_seeded()
+a = db5.account()
+check("old-account trades archived, not deleted",
+      r["archived"] == 2
+      and db5._conn.execute("SELECT COUNT(*) FROM trades_archive").fetchone()[0] == 2)
+check("new-account trades kept", r["kept"] == 2)
+check("realized = new account only", abs(db5.realized_pnl() - 12.0) < 1e-9)
+check("equity resynced to start + new realized", abs(a["equity"] - 512.0) < 1e-6)
+check("inception stays the funded balance", a["inception"] == 500.0)
+check("history starts at the reset", a["inception_ts"].startswith("2026-08-15T00:00:00"))
+check("backup written", bool(r["backup"]) and os.path.exists(r["backup"]))
+check("second run is a no-op",
+      ledger_reset.run(db5, "2026-08-15T00:00:00Z", 500.0)["archived"] == 0)
+db5.insert_position(dict(coin="HYPE", side="long", entry=80.0, qty=1.0, notional=80.0,
+                         margin=40.0, peak=80.0, hard_stop=72.0, hard_stop_id="n",
+                         trail_active=0, trail_stop=None, intended_entry=80.0,
+                         opened_at="2026-08-14T00:00:00+00:00"))
+try:
+    ledger_reset.run(db5, "2026-08-15T00:00:00Z", 500.0)
+    check("refuses while an old-account position is still booked", False)
+except RuntimeError:
+    check("refuses while an old-account position is still booked", True)
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
