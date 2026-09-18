@@ -27,12 +27,15 @@ a{color:inherit;text-decoration:none}
 .sn{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
   padding:14px 22px;background:rgba(13,10,20,0.85);backdrop-filter:blur(10px);
   border-bottom:1px solid var(--border)}
-.sn-brand{display:flex;align-items:center;gap:12px}
-.sn-brand-mark{width:30px;height:30px;border-radius:50%;
-  background:radial-gradient(circle at 35% 30%, var(--gold), var(--gold-dim) 70%, #3a2e12);
-  box-shadow:0 0 14px rgba(212,168,67,0.35);position:relative}
-.sn-brand-mark::after{content:"";position:absolute;inset:5px;border-radius:50%;
-  border:1px solid rgba(13,10,20,0.55)}
+.sn-brand{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit}
+.sn-brand-mark{width:38px;height:38px;object-fit:contain;flex:none;
+  filter:drop-shadow(0 0 8px rgba(212,168,67,0.28));transition:filter .2s}
+.sn-brand:hover .sn-brand-mark{filter:drop-shadow(0 0 12px rgba(212,168,67,0.5))}
+.sn-brand:hover .sn-brand-sub{color:var(--gold)}
+.sn-home{margin-left:10px;padding:7px 12px;border:1px solid var(--border);border-radius:6px;
+  font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);
+  text-decoration:none;white-space:nowrap;transition:.15s}
+.sn-home:hover{color:var(--gold);border-color:var(--gold-dim)}
 .sn-brand-name{font-family:var(--display);font-weight:700;letter-spacing:.18em;font-size:18px;color:var(--gold)}
 .sn-brand-sub{display:block;font-size:9px;letter-spacing:.28em;color:var(--mute);text-transform:uppercase;margin-top:1px}
 .sn-links{display:flex;gap:4px}
@@ -45,6 +48,7 @@ a{color:inherit;text-decoration:none}
 .sn-mobile{display:none;flex-direction:column;background:var(--panel);border-bottom:1px solid var(--border)}
 .sn-mobile a{padding:12px 22px;border-top:1px solid var(--border);color:var(--dim);text-transform:uppercase;font-size:12px;letter-spacing:.08em}
 .sn-mobile a.on{color:var(--gold)}
+.sn-mobile a.sn-home-m{color:var(--gold)}
 
 /* ── mode banner ── */
 .mode-banner{margin:14px 22px 0;padding:8px 14px;border-radius:8px;font-size:11px;letter-spacing:.18em;
@@ -220,7 +224,7 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
 
 .placeholder{color:var(--mute);font-size:12px;padding:30px;text-align:center;border:1px dashed var(--border);border-radius:10px}
 @media(max-width:820px){
-  .sn-links{display:none}.sn-ham{display:block}
+  .sn-links{display:none}.sn-ham{display:block}.sn-home{display:none}
   .hero{grid-template-columns:1fr 1fr}.kpis{grid-template-columns:1fr 1fr}
   .hero2{grid-template-columns:1fr 1fr;gap:16px}
   .srow{grid-template-columns:1fr}
@@ -238,13 +242,13 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
 <body>
 
 <nav class="sn">
-  <div class="sn-brand">
-    <div class="sn-brand-mark"></div>
+  <a class="sn-brand" href="https://soomariostrategies.com" title="Back to soomariostrategies.com">
+    <img class="sn-brand-mark" src="https://soomariostrategies.com/soomario-logo-128.png" alt="Soomario" width="38" height="38">
     <div class="sn-brand-text">
-      <span class="sn-brand-name">ELITE</span>
-      <span class="sn-brand-sub">Soomario · RSI Swing</span>
+      <span class="sn-brand-name" id="bookName">LIBRATION</span>
+      <span class="sn-brand-sub">Soomario Strategies</span>
     </div>
-  </div>
+  </a>
   <div class="sn-links" id="navLinks">
     <a data-tab="overview" class="on">Overview</a>
     <a data-tab="positions">Positions</a>
@@ -253,9 +257,11 @@ table.dt tr:hover td{background:rgba(123,94,167,0.07)}
     <a data-tab="universe">Universe</a>
     <a data-tab="reports">Reports</a>
   </div>
+  <a class="sn-home" href="https://soomariostrategies.com">&larr; Main site</a>
   <button class="sn-ham" onclick="document.getElementById('snMobile').style.display=(document.getElementById('snMobile').style.display==='flex'?'none':'flex')">☰</button>
 </nav>
 <div class="sn-mobile" id="snMobile">
+  <a class="sn-home-m" href="https://soomariostrategies.com">&larr; Soomario Strategies</a>
   <a data-tab="overview" class="on">Overview</a>
     <a data-tab="positions">Positions</a>
   <a data-tab="trades">Trades</a>
@@ -580,6 +586,13 @@ document.addEventListener('click', e=>{
 /* ── overview loaders ── */
 async function loadStatus(){
   const s = await api('/api/status'); if(!s) return;
+  // Every deployment of this repo serves this page, so the header names the book
+  // from BOOK_NAME rather than a literal ("ELITE" was hardcoded here before).
+  const bn = (s.name || (s.config && s.config.name) || '').replace(/^Soomario\s+/i,'').trim();
+  if(bn){
+    document.getElementById('bookName').textContent = bn.toUpperCase();
+    document.title = bn + ' · Soomario';
+  }
   const mode = (s.config && s.config.mode) || 'PAPER';
   const banner = document.getElementById('modeBanner');
   banner.className = 'mode-banner mode-'+mode;
