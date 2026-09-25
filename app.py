@@ -357,6 +357,24 @@ def run_worker():
         logger.warning("⚠️  CLEAR_MAX_DD_HALT=1 — max-drawdown halt cleared. "
                        "REMOVE this env var now.")
         tg_notify("⚠️ Max-drawdown halt manually cleared. Trading may resume.", level="warn")
+    # Money added to (or taken out of) the account. Performance equity is
+    # flow-neutral, so a deposit is invisible until it is recorded here: without
+    # this the book keeps sizing off the pre-deposit equity and the drawdown
+    # floor stays anchored to a balance that no longer exists.
+    _cf = (os.getenv("CAPITAL_FLOW") or "").strip()
+    if _cf:
+        import capital_flow
+        try:
+            pm.ensure_seeded()                    # anchor exists before moving it
+            _ve = None if config.PAPER else (hl.get_equity() or 0.0)
+            _flow = capital_flow.resolve(db, _cf, venue_equity=_ve,
+                                         open_upnl=pm.equity() - (db.account()["equity"] or 0.0))
+            _res = capital_flow.apply(db, _flow)
+            tg_notify(f"💵 Recorded a {'deposit' if _flow > 0 else 'withdrawal'} of "
+                      f"${abs(_flow):,.2f}. Equity now ${_res['after']['equity']:,.2f}, "
+                      f"drawdown anchor ${_res['after']['inception']:,.2f}.", level="warn")
+        except Exception as e:
+            logger.exception(f"💵 CAPITAL_FLOW={_cf} FAILED ({e}) - account untouched")
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
     # The venue re-funded the account under the same credentials (a Foxify
