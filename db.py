@@ -123,6 +123,11 @@ class DB:
             # never the percentage, so this is the only anchor a vault can use.
             ("account", "dd_index", "REAL"),
             ("account", "dd_index_peak", "REAL"),
+            # Which measure the day's baseline was captured from: the venue's
+            # account value or the local ledger. Comparing one against the other
+            # reads their difference as a loss - a vault switched to venue
+            # sizing halted on a "9.22% daily loss" while flat and untraded.
+            ("account", "daily_basis", "TEXT"),
         ]
         for table, col, typ in adds:
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}

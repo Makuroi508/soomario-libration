@@ -327,7 +327,7 @@ class PositionManager:
                            "baseline unchanged, retrying next tick")
             return
         self.db.set_account(daily_baseline=base, daily_halt=0,
-                            last_reset=utc_date_str())
+                            last_reset=utc_date_str(), daily_basis=self.risk_basis())
         logger.info(f"🔄 daily baseline reset to ${base:.2f}")
 
     # ── venue rules (authoritative over env) ───────────────────
@@ -351,11 +351,26 @@ class PositionManager:
 
     def daily_limit_pct(self) -> float:
         """Where the guard fires on the day. Never looser than the venue allows;
-        an explicitly tighter DAILY_DD_PCT still wins."""
+        an explicitly tighter DAILY_DD_PCT still wins.
+
+        Returns 0 when the guard is OFF: DAILY_DD_PCT=0 on a venue with no daily
+        rule of its own. A book of 12 coins can have one hard stop put the day
+        down a few percent while the other eleven are still working, and on an
+        account you own there is no rule that says the day has to end there. A
+        venue daily limit always overrides it - that one is not optional.
+        """
         venue = self.venue_rules().get("daily_loss_pct")
         if venue:
-            return min(config.DAILY_DD_PCT, max(venue - config.DD_GUARD_MARGIN, 0.25))
-        return config.DAILY_DD_PCT
+            return min(config.DAILY_DD_PCT or venue,
+                       max(venue - config.DD_GUARD_MARGIN, 0.25))
+        return max(config.DAILY_DD_PCT, 0.0)
+
+    def risk_basis(self) -> str:
+        """Which measure _risk_equity() returns, so a baseline can record it."""
+        if config.PAPER:
+            return "ledger"
+        return "venue" if (config.EXCHANGE in ("propr", "foxify")
+                           or config.EQUITY_SOURCE == "venue") else "ledger"
 
     def dd_limit(self) -> tuple:
         """(max_drawdown_pct, anchor_type) — venue first, env as fallback."""
@@ -567,6 +582,28 @@ class PositionManager:
             return
         halted = bool(acct["daily_halt"])
         limit = self.daily_limit_pct()
+        if limit <= 0:
+            # Guard off. Clear a halt left behind by a previous setting rather
+            # than leaving the book blocked with nothing able to lift it.
+            if halted:
+                self.db.set_account(daily_halt=0)
+                logger.warning("daily guard is off (DAILY_DD_PCT=0) - clearing the "
+                               "daily halt left by the previous setting")
+            return
+        # The baseline and the guard must read the SAME measure. When the source
+        # changes (a vault moving to venue sizing), the day's baseline is stale
+        # by the whole difference between the two - recapture instead of calling
+        # that difference a loss.
+        basis = self.risk_basis()
+        if (acct.get("daily_basis") or "ledger") != basis:
+            fresh = self._risk_equity(strict=True)
+            if fresh is None or fresh <= 0:
+                return
+            self.db.set_account(daily_baseline=fresh, daily_basis=basis, daily_halt=0)
+            logger.warning(f"daily baseline recaptured on the {basis} measure: "
+                           f"${base:.2f} -> ${fresh:.2f} (the old one was read from a "
+                           f"different source; any halt from that gap is cleared)")
+            return
         eq = self._risk_equity(strict=True)
         if eq is None:
             # Cannot measure risk against the same basis as the baseline.

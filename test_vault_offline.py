@@ -194,5 +194,51 @@ pm7.ensure_seeded()
 pm7.check_max_dd()
 check("the dollar guard still fires on its own anchor", db7.max_dd_halt())
 
+print("\n6. the daily guard cannot compare two different measures")
+config.EQUITY_SOURCE, config.DD_BASIS, config.DD_TYPE = "venue", "index", "static"
+config.DAILY_DD_PCT = 4.0
+db8, pm8 = fresh("daily.db")                 # ledger 1810.21, vault 1643.27
+db8.set_account(daily_baseline=1810.21, daily_basis=None)   # captured on the ledger
+check("the two measures differ by 9.2%",
+      abs((1810.21 - 1643.27) / 1810.21 * 100 - 9.22) < 0.05)
+pm8.check_daily_dd()
+check("no halt: the stale baseline is recaptured, not called a loss",
+      not db8.daily_halt())
+check("  baseline is now the venue's number",
+      abs(db8.account()["daily_baseline"] - 1643.27) < 0.01)
+check("  and the measure it came from is recorded", db8.account()["daily_basis"] == "venue")
+pm8.client.eq = 1643.27 * 0.95               # a real 5% day
+pm8.check_daily_dd()
+check("a REAL daily loss past the limit still halts", db8.daily_halt())
+
+db9, pm9 = fresh("daily2.db")
+db9.set_account(daily_baseline=1643.27, daily_basis="venue")
+pm9.client.eq = 1643.27 * 0.97               # 3% down, inside the 4% limit
+pm9.check_daily_dd()
+check("a matched baseline is left alone", not db9.daily_halt()
+      and abs(db9.account()["daily_baseline"] - 1643.27) < 0.01)
+pm9.reset_daily_baseline()
+check("the daily reset stamps the measure too", db9.account()["daily_basis"] == "venue")
+
+print("\n7. DAILY_DD_PCT=0 turns the daily guard off")
+config.DAILY_DD_PCT = 0.0
+db10, pm10 = fresh("off.db")
+db10.set_account(daily_baseline=1643.27, daily_basis="venue", daily_halt=1)
+pm10.client.eq = 1643.27 * 0.80              # a 20% day
+pm10.check_daily_dd()
+check("no halt however far the day is down", not db10.daily_halt())
+check("  entries are allowed again", pm10.maybe_enter("HYPE", "long", 80.0) is not None)
+check("the max-drawdown guard is untouched by this", config.MAX_DD_PCT == 20.0)
+
+
+class PropVenue(Vault):
+    def challenge_rules(self):
+        return {"max_dd_pct": 8.0, "daily_loss_pct": 5.0, "dd_type": "trailing"}
+
+
+db11, pm11 = fresh("venue_rule.db", PropVenue())
+check("a venue's own daily rule still applies with DAILY_DD_PCT=0",
+      abs(pm11.daily_limit_pct() - 5.0) < 1e-9)
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
