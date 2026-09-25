@@ -179,11 +179,17 @@ def _write_status(db, pm, equity, total_upnl, marks):
             day = (datetime.now(timezone.utc) - d0).days + 1
         except (ValueError, TypeError):
             day = None
+    _idx, _peak = db.dd_index()
     save_json(config.STATUS_FILE, {
         "ts": iso(),
         "name": config.NAME,
         "config": config_summary(),
         "equity": round(equity, 2),
+        # What sizing actually used this tick, and the flow-immune drawdown.
+        "sizing_equity": round(pm.sizing_equity(), 2),
+        "dd_index": round(_idx, 6),
+        "dd_index_peak": round(_peak, 6),
+        "dd_index_dd_pct": round((_idx / _peak - 1) * 100, 2) if _peak else 0.0,
         "total_upnl": round(total_upnl, 2),
         "realized_pnl": round(realized_pnl, 2),
         "total_pnl": round(total_pnl, 2),

@@ -358,6 +358,17 @@ class ExitManager:
         acct = self.db.account()
         self.db.set_account(equity=(acct["equity"] or 0.0) + net_pnl)
 
+        # ...and the same result, as a PERCENTAGE, into the drawdown index. The
+        # base is the capital the book was actually sized from, so on a vault a
+        # $50 loss on $5,000 of depositor money counts the same as $10 on $1,000
+        # - which is the whole point of measuring a vault in units.
+        try:
+            base = self.pm.sizing_equity() if self.pm else (acct["equity"] or 0.0)
+            if base > 0:
+                self.db.bump_dd_index(net_pnl / base)
+        except Exception as e:                                # noqa: BLE001
+            logger.warning(f"dd index not updated for {pos['coin']}: {e}")
+
         self.db.book_trade(dict(
             coin=pos["coin"], side=pos["side"], entry=entry, exit=fill_px, qty=qty,
             ret_pct=round(ret_pct, 4), net_pct=round(net_pct, 4),

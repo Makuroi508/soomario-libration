@@ -117,6 +117,12 @@ class DB:
             # written after the delay became explicit.
             ("shadow_state", "arm_delay_h", "REAL"),
             ("shadow_trades", "arm_delay_h", "REAL"),
+            # Flow-immune drawdown. dd_index compounds each closed trade's
+            # percentage result from 1.0; dd_index_peak is its high-water mark.
+            # Deposits and withdrawals change the dollars behind a percentage,
+            # never the percentage, so this is the only anchor a vault can use.
+            ("account", "dd_index", "REAL"),
+            ("account", "dd_index_peak", "REAL"),
         ]
         for table, col, typ in adds:
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -134,6 +140,21 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         self._conn.execute(f"UPDATE account SET {cols} WHERE id=1", tuple(fields.values()))
         self._conn.commit()
+
+    def dd_index(self) -> tuple:
+        """(index, peak). Both default to 1.0 on an account that predates it."""
+        a = self.account()
+        idx = a.get("dd_index") or 1.0
+        return float(idx), float(a.get("dd_index_peak") or idx)
+
+    def bump_dd_index(self, ret_frac: float) -> tuple:
+        """Compound one closed trade's return (as a fraction of the capital it
+        was sized from) into the index. Returns the new (index, peak)."""
+        idx, peak = self.dd_index()
+        idx = max(idx * (1.0 + float(ret_frac)), 1e-9)
+        peak = max(peak, idx)
+        self.set_account(dd_index=round(idx, 10), dd_index_peak=round(peak, 10))
+        return idx, peak
 
     def daily_halt(self) -> bool:
         return bool(self.account()["daily_halt"])

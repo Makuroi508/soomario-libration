@@ -163,9 +163,29 @@ class PositionManager:
         return realized + upnl
 
     # ── capacity ───────────────────────────────────────────────
+    def sizing_equity(self) -> float:
+        """The capital positions are sized from.
+
+        EQUITY_SOURCE=venue reads the exchange every time, which is what a VAULT
+        needs: depositors add and remove capital without the bot ever hearing
+        about it, and the flow-neutral ledger would keep sizing off money that
+        has left (or ignore money that arrived). A failed read falls back to the
+        ledger rather than sizing off zero.
+        """
+        if config.EQUITY_SOURCE == "venue" and not config.PAPER:
+            try:
+                venue = self.client.get_equity() or 0.0
+            except Exception as e:                            # noqa: BLE001
+                logger.warning(f"sizing: venue equity read failed ({e}) - using the ledger")
+                venue = 0.0
+            if venue > 0:
+                return venue
+            logger.warning("sizing: venue equity unavailable - using the ledger")
+        return self.equity()
+
     def free_margin(self) -> float:
         locked = sum(p["margin"] for p in self.db.open_positions())
-        return self.equity() - locked
+        return self.sizing_equity() - locked
 
     def has_capacity(self) -> bool:
         return len(self.db.open_positions()) < self.max_concurrent
@@ -188,7 +208,7 @@ class PositionManager:
         if not self.has_capacity():
             self.db.log_miss(coin, signal, "concurrency_full"); return None
 
-        eq = self.equity()
+        eq = self.sizing_equity()
         if eq <= 0:
             self.db.log_miss(coin, signal, "no_equity"); return None
         mult = config.size_mult(coin)
@@ -362,7 +382,8 @@ class PositionManager:
         were really about -1.2% down on the day. Non-strict callers (status
         display, logging) can still take the approximation.
         """
-        if config.EXCHANGE in ("propr", "foxify") and not config.PAPER:
+        if (config.EXCHANGE in ("propr", "foxify") or config.EQUITY_SOURCE == "venue") \
+                and not config.PAPER:
             try:
                 eq = self.client.get_equity() or 0.0
             except Exception as e:
@@ -420,6 +441,42 @@ class PositionManager:
                       f"Retrying every tick — check the exchange manually.", level="warn")
         return closed
 
+    def _check_max_dd_index(self, max_dd, dd_type, exit_manager=None):
+        """Max drawdown on the unit-value index, so deposits and withdrawals
+        cannot move the floor.
+
+        The index compounds each closed trade's percentage result. Open
+        positions are marked into it here rather than left out: an unrealised
+        loss is exactly the case the guard exists for.
+
+        TRAILING measures from the index's own high-water mark - a real one,
+        persisted, not the max(inception, equity) stand-in the dollar path has
+        to use on venues that publish no mark. STATIC measures from 1.0, the
+        day the index started.
+        """
+        idx, peak = self.db.dd_index()
+        upnl = 0.0
+        for p in self.db.open_positions():
+            px = self.client.get_price(p["coin"]) or p["entry"]
+            move = (px - p["entry"]) if p["side"] == "long" else (p["entry"] - px)
+            upnl += move * p["qty"]
+        capital = self.sizing_equity() - upnl
+        live = idx * (1.0 + upnl / capital) if capital > 0 else idx
+        anchor = peak if dd_type == "trailing" else 1.0
+        effective = max(max_dd - config.DD_GUARD_MARGIN, 0.25)
+        floor = anchor * (1 - effective / 100)
+        if live > floor:
+            return
+        dd = (anchor - live) / anchor * 100
+        self.db.set_account(max_dd_halt=1, daily_halt=1)
+        logger.error(f"🚨 MAX DD GUARD: index {live:.4f} <= floor {floor:.4f} "
+                     f"({dd:.2f}% below the {dd_type} index anchor {anchor:.4f}; "
+                     f"limit {max_dd}%) — flattening and pausing")
+        tg_notify(f"🚨 *MAX DRAWDOWN GUARD* — {dd:.2f}% below the {dd_type} anchor "
+                  f"(index {live:.4f} vs {anchor:.4f}).\nEverything is being closed and "
+                  f"entries are halted until a human clears it.", level="warn")
+        self.flatten_all(exit_manager, reason="MAX_DD_GUARD")
+
     def check_max_dd(self, exit_manager=None):
         """The limit that actually ends a challenge. The daily guard resets at
         UTC midnight; this one does not — breach it and the account is gone
@@ -445,6 +502,10 @@ class PositionManager:
         # $10000.00 anchor read as 9.09% and flattened the book, while the
         # venue's own numbers were $9491.58 against a $10010.89 high-water
         # mark - 5.19%, comfortably inside the 8% limit.
+        # A vault's capital moves on its own, so dollars cannot anchor anything:
+        # measure the index instead, which only moves when a trade does.
+        if config.DD_BASIS == "index":
+            return self._check_max_dd_index(max_dd, dd_type, exit_manager)
         eq = self._risk_equity(strict=True)
         if eq is None or eq <= 0:
             logger.error("max-dd: venue equity unavailable - SKIPPING this tick rather "

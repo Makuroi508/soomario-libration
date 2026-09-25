@@ -303,6 +303,26 @@ MAX_DD_PCT      = _f("MAX_DD_PCT", 0)              # e.g. 8 for a 2-Step
 DD_TYPE         = os.getenv("DD_TYPE", "static").strip().lower()   # static | trailing
 DD_GUARD_MARGIN = _f("DD_GUARD_MARGIN", 1.5)       # points of buffer
 
+# Where SIZING reads the account's capital.
+#   ledger  the flow-neutral book (inception + realized PnL). Right for an
+#           account whose capital only moves when you move it.
+#   venue   the exchange's own account value, every tick. Right for a VAULT,
+#           where other people deposit and withdraw without telling the bot:
+#           the ledger would keep sizing off capital the vault no longer has
+#           (measured on the live vault: $1,810 booked against $1,643 real).
+# Defaults to venue for a vault, ledger otherwise. Performance reporting always
+# stays on the ledger, so a deposit can never be read as profit.
+EQUITY_SOURCE = os.getenv("EQUITY_SOURCE", "venue" if HL_IS_VAULT else "ledger").strip().lower()
+
+# What the max-drawdown guard measures.
+#   equity  dollars against a dollar anchor. Correct when capital is fixed.
+#   index   a unit-value curve that compounds each trade's PERCENTAGE result,
+#           so deposits and withdrawals move it not at all. The only basis that
+#           works on a vault: a dollar anchor there is either already stale or
+#           made toothless by the next deposit.
+# Defaults to index wherever capital can move on its own.
+DD_BASIS = os.getenv("DD_BASIS", "index" if EQUITY_SOURCE == "venue" else "equity").strip().lower()
+
 # ─── Sizing / leverage / concurrency ────────────────────────────
 LEVERAGE      = _f("LEVERAGE", 2)        # launch at 2x (no liquidation risk vs 10% stop)
 NOTIONAL_FRAC = _f("NOTIONAL_FRAC", 0.20)  # 20% of equity notional per position
@@ -425,6 +445,8 @@ def summary() -> dict:
         "hard_stop_pct": HARD_STOP_PCT,
         "daily_dd_pct": DAILY_DD_PCT,
         "max_dd": f"{MAX_DD_PCT}% {DD_TYPE}" if MAX_DD_PCT else "off",
+        "equity_source": EQUITY_SOURCE,
+        "dd_basis": DD_BASIS,
         "mode": "PAPER" if PAPER else ("DRY_RUN" if DRY_RUN else "LIVE"),
         "db": str(DB_PATH),
     }
