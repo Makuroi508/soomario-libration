@@ -312,6 +312,14 @@ DD_GUARD_MARGIN = _f("DD_GUARD_MARGIN", 1.5)       # points of buffer
 #           (measured on the live vault: $1,810 booked against $1,643 real).
 # Defaults to venue for a vault, ledger otherwise. Performance reporting always
 # stays on the ledger, so a deposit can never be read as profit.
+# A signal against an open position. TradingView's strategy.entry REVERSES:
+# it closes the position and opens the other way in one order, which is what
+# every backtest in this book assumes. Without it the bot holds the old
+# position and silently skips the signal - on 2026-09-28 four accounts sat in a
+# HYPE long, entered 09-25, while TradingView had been short since 04:00,
+# because the trail never armed and the long was never released.
+REVERSE_ON_SIGNAL = _b("REVERSE_ON_SIGNAL", "1")
+
 EQUITY_SOURCE = os.getenv("EQUITY_SOURCE", "venue" if HL_IS_VAULT else "ledger").strip().lower()
 
 # What the max-drawdown guard measures.
@@ -445,6 +453,7 @@ def summary() -> dict:
         "hard_stop_pct": HARD_STOP_PCT,
         "daily_dd_pct": DAILY_DD_PCT,
         "max_dd": f"{MAX_DD_PCT}% {DD_TYPE}" if MAX_DD_PCT else "off",
+        "reverse_on_signal": REVERSE_ON_SIGNAL,
         "equity_source": EQUITY_SOURCE,
         "dd_basis": DD_BASIS,
         "mode": "PAPER" if PAPER else ("DRY_RUN" if DRY_RUN else "LIVE"),

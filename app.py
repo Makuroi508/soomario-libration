@@ -348,6 +348,7 @@ def run_worker():
     db = DB()
     pm = PositionManager(hl, db)
     em = ExitManager(hl, db, pm)
+    pm.exit_manager = em            # so a reversal can book the closed side
     shadow = ShadowTracker(db)
     pm.ensure_seeded()
     # One-time incident repair: remove phantom closes (booked when a flaky API

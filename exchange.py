@@ -132,6 +132,7 @@ class VenueBook:
         self.db = DB(path=str(self.dir / "libration.db"))
         self.pm = PositionManager(client, self.db)
         self.em = ExitManager(client, self.db, self.pm)
+        self.pm.exit_manager = self.em      # so a reversal can book the closed side
         self.status_file = self.dir / "status.json"
         self.equity_log = self.dir / "equity_log.jsonl"
 

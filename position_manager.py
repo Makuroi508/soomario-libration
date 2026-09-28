@@ -203,8 +203,22 @@ class PositionManager:
             self.db.log_miss(coin, signal, "max_dd_halt"); return None
         if self.db.daily_halt():
             self.db.log_miss(coin, signal, "daily_dd_halt"); return None
-        if self.db.has_open_position(coin):
-            return None  # pyramiding 1 — already in this coin
+        held = self.db.get_position(coin)
+        if held:
+            if held["side"] == signal:
+                return None            # pyramiding 1 — already this way round
+            # Opposite signal. TradingView reverses here; so do we, or the book
+            # drifts away from the backtest for as long as the old position
+            # lives. Reason REVERSAL keeps it distinguishable in the ledger.
+            if not config.REVERSE_ON_SIGNAL:
+                self.db.log_miss(coin, signal, "opposite_position_held"); return None
+            fill = self.close_one(held, reason="REVERSAL")
+            if fill is None:
+                logger.error(f"❌ {coin}: cannot reverse {held['side']} -> {signal}, "
+                             f"the close did not fill — retrying next tick")
+                self.db.log_miss(coin, signal, "reversal_close_failed"); return None
+            logger.warning(f"🔄 {coin}: reversed {held['side']} -> {signal} "
+                           f"at ${fill:.6f}")
         if not self.has_capacity():
             self.db.log_miss(coin, signal, "concurrency_full"); return None
 
@@ -411,43 +425,51 @@ class PositionManager:
             logger.warning("guard: venue equity unavailable — falling back to perf equity")
         return self.equity()
 
+    def close_one(self, p, reason: str, exit_manager=None):
+        """Close ONE open position at market and book it. Returns the fill price,
+        or None when the venue would not close it (caller retries)."""
+        em = exit_manager or getattr(self, "exit_manager", None)
+        coin, is_long = p["coin"], p["side"] == "long"
+        px = self.client.get_price(coin) or p["entry"]
+        if config.PAPER:
+            fill = self._paper_fill_price(px, not is_long)
+        else:
+            res = self.client.market_close(coin, p["qty"], is_long, current_price=px)
+            if not (res and res.get("filled")):
+                return None
+            fill = float(res.get("avg_price") or px)
+            # Close FIRST, then cancel the trigger — never leave the position
+            # naked in the window between the two calls.
+            sid = p.get("hard_stop_id")
+            if sid and str(sid) != "paper":
+                try:
+                    self.client.cancel_order(
+                        coin, int(sid) if str(sid).isdigit() else sid)
+                except (TypeError, ValueError):
+                    pass
+        if em is not None:
+            em.close_position(p, fill_px=fill, reason=reason, intended_exit=px)
+        else:
+            self.db.delete_position(coin)
+        return fill
+
     def flatten_all(self, exit_manager=None, reason: str = "DAILY_GUARD") -> int:
         """Close every open position now, clear its resting stop, and book it.
 
         Idempotent and self-retrying: anything that fails to close stays in the
         book and is retried on the next tick, so a transient API error can never
         leave a position silently unmanaged behind a halt flag."""
-        em = exit_manager or getattr(self, "exit_manager", None)
         open_pos = self.db.open_positions()
         if not open_pos:
             return 0
         closed, failed = 0, []
         for p in open_pos:
-            coin, is_long = p["coin"], p["side"] == "long"
-            px = self.client.get_price(coin) or p["entry"]
-            if config.PAPER:
-                fill = self._paper_fill_price(px, not is_long)
-            else:
-                res = self.client.market_close(coin, p["qty"], is_long, current_price=px)
-                if not (res and res.get("filled")):
-                    failed.append(coin)
-                    continue
-                fill = float(res.get("avg_price") or px)
-                # Close FIRST, then cancel the trigger — never leave the position
-                # naked in the window between the two calls.
-                sid = p.get("hard_stop_id")
-                if sid and str(sid) != "paper":
-                    try:
-                        self.client.cancel_order(
-                            coin, int(sid) if str(sid).isdigit() else sid)
-                    except (TypeError, ValueError):
-                        pass
-            if em is not None:
-                em.close_position(p, fill_px=fill, reason=reason, intended_exit=px)
-            else:
-                self.db.delete_position(coin)
+            fill = self.close_one(p, reason=reason, exit_manager=exit_manager)
+            if fill is None:
+                failed.append(p["coin"])
+                continue
             closed += 1
-            logger.warning(f"🧯 {reason}: flattened {coin} {p['side']} "
+            logger.warning(f"🧯 {reason}: flattened {p['coin']} {p['side']} "
                            f"{p['qty']:.6f} @ ${fill:.6f}")
         if failed:
             logger.error(f"❌ {reason}: could not close {', '.join(failed)} "
