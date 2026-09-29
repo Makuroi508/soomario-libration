@@ -153,5 +153,20 @@ check("both positions closed", n == 2 and not db6.open_positions())
 check("  booked with the guard's reason",
       all(t["exit_reason"] == "DAILY_GUARD" for t in db6.recent_trades(5)))
 
+print("\n7. close_one is what FORCE_CLOSE uses")
+db7, pm7, c7 = book("force.db")
+long_hype(db7)
+fill = pm7.close_one(db7.get_position("HYPE"), reason="FORCE_CLOSE")
+check("closed at the venue", fill == 90.0 and bool(c7.closed))
+check("  booked as FORCE_CLOSE", db7.recent_trades(2)[0]["exit_reason"] == "FORCE_CLOSE")
+check("  the stop was cancelled", bool(c7.cancels) and c7.cancels[0][1] == "oid0")
+check("  the book is flat", not db7.open_positions())
+
+db8, pm8, c8 = book("force_fail.db", Client(close_ok=False))
+long_hype(db8)
+check("a venue that will not fill leaves it open",
+      pm8.close_one(db8.get_position("HYPE"), reason="FORCE_CLOSE") is None
+      and db8.open_positions()[0]["side"] == "long")
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

@@ -382,6 +382,26 @@ def run_worker():
                       f"drawdown anchor ${_res['after']['inception']:,.2f}.", level="warn")
         except Exception as e:
             logger.exception(f"💵 CAPITAL_FLOW={_cf} FAILED ({e}) - account untouched")
+    # Close a named position NOW, once, and book it properly. For venues whose
+    # own UI cannot close a bot-held position (Foxify/Kitsune has no order
+    # screen), and for resyncing a coin the strategy should no longer hold.
+    # FORCE_CLOSE=XMR or FORCE_CLOSE=XMR,PENGU. Remove after the boot.
+    _fc = [c.strip().upper() for c in (os.getenv("FORCE_CLOSE") or "").split(",") if c.strip()]
+    if _fc:
+        for _coin in _fc:
+            _p = db.get_position(_coin)
+            if not _p:
+                logger.warning(f"🔻 FORCE_CLOSE={_coin}: no open position - nothing to do")
+                continue
+            _fill = pm.close_one(_p, reason="FORCE_CLOSE", exit_manager=em)
+            if _fill is None:
+                logger.error(f"🔻 FORCE_CLOSE={_coin}: the venue did not fill the close - "
+                             f"position left open, try again")
+            else:
+                logger.warning(f"🔻 FORCE_CLOSE={_coin}: closed {_p['side']} {_p['qty']} "
+                               f"@ ${_fill:.6f} - REMOVE the FORCE_CLOSE env var now")
+                tg_notify(f"🔻 Force-closed {_coin} {_p['side']} at ${_fill:.6f} "
+                          f"(manual instruction).", level="warn")
     if os.getenv("REPAIR_PHANTOM_CLOSES") == "1":
         _repair_phantom_closes(hl, db)
     # The venue re-funded the account under the same credentials (a Foxify
