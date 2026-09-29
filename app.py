@@ -543,7 +543,8 @@ def tick(hl, db, pm, em, shadow):
             # the bar gate has to be computed per coin too -- a 30m coin must
             # not be held back by the 4h boundary.
             _tf = config.rsi_tf(coin)
-            _bar_ms = _INTERVAL_MS.get(_tf, config.bar_seconds(coin) * 1000)
+            _ctf = config.chart_tf(coin)
+            _bar_ms = _INTERVAL_MS.get(_ctf, config.chart_bar_seconds(coin) * 1000)
             _expect_last_close = (now_ms // _bar_ms) * _bar_ms - _bar_ms
             _st = db.get_rsi_state(coin)
             _seen = int(_st["last_closed_4h_ts"]) if _st and _st.get("last_closed_4h_ts") else None
@@ -555,6 +556,14 @@ def tick(hl, db, pm, em, shadow):
             candles = feeds.fetch_candles(config.signal_venue(coin), coin, _tf,
                                           config.CANDLE_LIMIT, hl_client=hl)
             closed = signals.closed_candles(candles, now_ms)
+            # The chart timeframe decides WHEN the cross is evaluated; the RSI
+            # timeframe decides what value is read. Same series when they match.
+            if _ctf == _tf:
+                chart_closed = closed
+            else:
+                chart_closed = signals.closed_candles(
+                    feeds.fetch_candles(config.signal_venue(coin), coin, _ctf,
+                                        config.CANDLE_LIMIT, hl_client=hl), now_ms)
             # Persist daily closes for the report benchmarks while the candles are
             # already in hand — no extra network, and the 200-bar pull backfills
             # ~33 days on the first pass after deploy.
@@ -565,12 +574,16 @@ def tick(hl, db, pm, em, shadow):
             _len = config.rsi_len(coin)
             if len(closed) < _len + 2:
                 continue
-            last_ts = closed[-1]["t"]
+            if len(chart_closed) < 2:
+                continue
+            last_ts = chart_closed[-1]["t"]
             st = db.get_rsi_state(coin)
             seen = int(st["last_closed_4h_ts"]) if st and st.get("last_closed_4h_ts") else None
             closes = [c["c"] for c in closed]
             rsi = signals.wilder_rsi(closes, _len)
-            db.set_rsi_state(coin, last_ts, rsi[-1])
+            sig, _prev_r, _now_r = signals.cross_on_chart(
+                closed, rsi, chart_closed, config.long_level(coin), config.short_level(coin))
+            db.set_rsi_state(coin, last_ts, _now_r)
             if seen is None:
                 # Cold start: prime state but do NOT trade a cross that completed
                 # before we were watching — its close price is stale (the bar may
@@ -582,10 +595,8 @@ def tick(hl, db, pm, em, shadow):
                 continue
             if not signals.new_closed_bar(seen, last_ts):
                 continue  # already evaluated this bar — no double-fire
-            sig = signals.entry_signal(rsi[-2], rsi[-1],
-                                       config.long_level(coin), config.short_level(coin))
             if sig:
-                price = marks.get(coin) or closes[-1]
+                price = marks.get(coin) or chart_closed[-1]["c"]
                 pos = pm.maybe_enter(coin, sig, price)
                 if pos:
                     shadow.on_open(pos)   # start the counterfactual A/B on this entry

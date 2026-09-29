@@ -242,9 +242,10 @@ def arm_delay_sec(coin):
             return float(ov) * 60.0
         except (TypeError, ValueError):
             pass
-    # No explicit override: one bar of THIS coin's timeframe, not the global
-    # one, or a coin on a 1h RSI would inherit a 4h arming delay.
-    return TRAIL_ARM_DELAY_BARS * bar_seconds(coin)
+    # No explicit override: one bar of this coin's CHART timeframe. That is what
+    # the delay models - TradingView's strategy.exit only becomes live on the
+    # chart bar after the entry.
+    return TRAIL_ARM_DELAY_BARS * chart_bar_seconds(coin)
 
 def rsi_tf(coin) -> str:
     """Per-coin RSI timeframe. A STRING, so it cannot go through _coin_param,
@@ -277,6 +278,36 @@ def rsi_len(coin) -> int:
 def bar_seconds(coin) -> int:
     """Length of ONE bar on this coin's own RSI timeframe."""
     return _TF_SECONDS.get(rsi_tf(coin), BAR_SECONDS)
+
+
+def chart_tf(coin) -> str:
+    """The CHART timeframe this coin was backtested on, which is how often
+    TradingView evaluates the cross.
+
+    The RSI timeframe and the chart timeframe are different settings there, and
+    the pair matters:
+
+      * chart == rsi (most coins)  identical to evaluating on the RSI close.
+      * chart  <  rsi (FARTCOIN 30m chart, 4h RSI)  the 4h value is re-read on
+        every 30m bar, so the cross is acted on within 30m of the 4h close.
+      * chart  >  rsi (TAO 1D chart, 6h RSI)  the 6h RSI is only LOOKED AT once
+        a day. Crosses that happen and unwind inside a day are never traded.
+        Evaluating on the 6h close instead produced trades TradingView never
+        took - TAO has been flat there since 2026-09-18 while the bot traded it.
+
+    Defaults to the RSI timeframe, which is the old behaviour.
+    """
+    ov = COIN_PARAMS.get(str(coin).upper(), {}).get("chart_tf")
+    if ov and str(ov) in _TF_SECONDS:
+        return str(ov)
+    if ov:
+        print(f"WARNING {coin}: unknown chart_tf {ov!r} -- using the RSI timeframe")
+    return rsi_tf(coin)
+
+
+def chart_bar_seconds(coin) -> int:
+    """Length of ONE bar on this coin's CHART timeframe."""
+    return _TF_SECONDS.get(chart_tf(coin), bar_seconds(coin))
 
 
 def short_level(coin):   return _coin_param(coin, "short_level", SHORT_LEVEL)
@@ -448,6 +479,7 @@ def summary() -> dict:
         "notional_frac": NOTIONAL_FRAC,
         "max_concurrent": MAX_CONCURRENT,
         "rsi": f"{RSI_LEN}@{RSI_TF}",
+        "chart_tfs": {c: chart_tf(c) for c in COINS if chart_tf(c) != rsi_tf(c)},
         "levels": f"L{LONG_LEVEL:.0f}/S{SHORT_LEVEL:.0f}",
         "trail_pct": TRAIL_PCT,
         "hard_stop_pct": HARD_STOP_PCT,

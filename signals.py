@@ -48,6 +48,35 @@ def entry_signal(rsi_prev, rsi_now, long_level=50.0, short_level=40.0):
     return None
 
 
+def rsi_at(rsi_candles, rsi_values, ts_ms):
+    """The RSI as TradingView would read it at `ts_ms`: the value of the last
+    RSI-timeframe bar that had CLOSED by then. None if there is no such bar."""
+    val = None
+    for c, r in zip(rsi_candles, rsi_values):
+        if c.get("T") is not None and c["T"] <= ts_ms and r is not None:
+            val = r
+        elif c.get("T") is not None and c["T"] > ts_ms:
+            break
+    return val
+
+
+def cross_on_chart(rsi_candles, rsi_values, chart_closed,
+                   long_level=50.0, short_level=40.0):
+    """Entry signal evaluated on the CHART's last two closed bars.
+
+    TradingView runs the script once per chart bar and reads the higher- (or
+    lower-) timeframe RSI through request.security, so the cross it sees is
+    between the RSI as of one chart close and the RSI as of the next. When the
+    two timeframes are equal this is exactly entry_signal(rsi[-2], rsi[-1]).
+    """
+    if len(chart_closed) < 2:
+        return None, None, None
+    now_ts, prev_ts = chart_closed[-1]["T"], chart_closed[-2]["T"]
+    now = rsi_at(rsi_candles, rsi_values, now_ts)
+    prev = rsi_at(rsi_candles, rsi_values, prev_ts)
+    return entry_signal(prev, now, long_level, short_level), prev, now
+
+
 def new_closed_bar(last_seen_ts, latest_closed_ts):
     """True only when a new 4h candle has closed since we last evaluated.
     Guards against double-firing on intra-bar polls.

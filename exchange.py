@@ -79,22 +79,32 @@ class SignalEngine:
         fired = {}
         for coin in self.coins:
             try:
-                candles = feeds.fetch_candles(config.signal_venue(coin), coin,
-                                              config.rsi_tf(coin), config.CANDLE_LIMIT,
-                                              hl_client=self.hl)
+                _tf, _ctf = config.rsi_tf(coin), config.chart_tf(coin)
+                candles = feeds.fetch_candles(config.signal_venue(coin), coin, _tf,
+                                              config.CANDLE_LIMIT, hl_client=self.hl)
                 closed = signals.closed_candles(candles, now_ms)
+                # Chart timeframe decides WHEN; RSI timeframe decides WHAT.
+                if _ctf == _tf:
+                    chart_closed = closed
+                else:
+                    chart_closed = signals.closed_candles(
+                        feeds.fetch_candles(config.signal_venue(coin), coin, _ctf,
+                                            config.CANDLE_LIMIT, hl_client=self.hl), now_ms)
                 _len = config.rsi_len(coin)
-                if len(closed) < _len + 2:
+                if len(closed) < _len + 2 or len(chart_closed) < 2:
                     continue
-                last_ts = closed[-1]["t"]
+                last_ts = chart_closed[-1]["t"]
                 st = self.db.get_rsi_state(coin)
                 seen = int(st["last_closed_4h_ts"]) if st and st.get("last_closed_4h_ts") else None
                 closes = [c["c"] for c in closed]
                 rsi = signals.wilder_rsi(closes, _len)
+                sig_now, _prev_r, _now_r = signals.cross_on_chart(
+                    closed, rsi, chart_closed,
+                    config.long_level(coin), config.short_level(coin))
                 # Persist the newest RSI + bar ts in the shared DB (the double-fire
                 # guard). This is the ONLY writer of rsi_state, so the cross can
                 # never be re-evaluated by a second venue on the same bar.
-                self.db.set_rsi_state(coin, last_ts, rsi[-1])
+                self.db.set_rsi_state(coin, last_ts, _now_r)
                 if seen is None:
                     logger.info(f"    · primed {coin} — no cold-start entry on pre-existing bar")
                     continue
@@ -103,12 +113,10 @@ class SignalEngine:
                 # Per-coin levels (COIN_PARAMS) -- the whole point of the merge:
                 # a fanned venue trades the same book with the same numbers,
                 # including CC's 65-above-50 straddle wherever it is listed.
-                sig = signals.entry_signal(rsi[-2], rsi[-1],
-                                           config.long_level(coin), config.short_level(coin))
-                if sig:
-                    fired[coin] = sig
-                    logger.info(f"    ⚡ SIGNAL {sig.upper()} {coin} "
-                                f"(rsi {rsi[-2]:.1f} → {rsi[-1]:.1f})")
+                if sig_now:
+                    fired[coin] = sig_now
+                    logger.info(f"    ⚡ SIGNAL {sig_now.upper()} {coin} "
+                                f"(rsi {_prev_r:.1f} → {_now_r:.1f})")
             except Exception as e:
                 logger.warning(f"signal eval {coin} failed: {e}")
         return fired
