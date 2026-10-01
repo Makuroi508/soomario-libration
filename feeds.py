@@ -20,6 +20,8 @@ fetcher returns the same shape the strategy already consumes:
 with the still-forming final bar left in — signals.closed_candles() drops it.
 """
 import logging
+import os
+import re as _re
 import time
 
 import requests
@@ -105,34 +107,105 @@ def _okx(coin, interval, limit):
 
 
 _FETCH = {"binance": _binance, "bybit": _bybit, "okx": _okx}
-# One failure should not silently poison the signal: remember the last good
-# series per (venue, coin, interval) and serve it if a later poll fails, rather
-# than returning [] and making the coin look like it has no history.
+# The last good series per (venue, coin, interval). Served ONLY where a stale
+# price is better than none - never to the signal path, see fetch_candles.
 _LAST_GOOD = {}
 
+# A venue that is failing is parked rather than hammered. On 2026-10-01 Binance
+# IP-banned the Railway egress ("HTTP 418 ... banned until"), every service kept
+# retrying 11 coins twice a tick, and the ban kept renewing. Meanwhile the stale
+# fallback meant the bots went on computing RSI from old bars and simply missed
+# crosses - aureus sat in an LTC short for a day while two other accounts
+# reversed it.
+_COOLDOWN = {}                       # venue -> epoch seconds until it is retried
+_BACKOFF = {}                        # venue -> current penalty, seconds
+_BACKOFF_START, _BACKOFF_MAX = 60.0, 1800.0
 
-def fetch_candles(venue: str, coin: str, interval: str, limit: int, hl_client=None):
+# When a coin's own venue is parked, read its candles somewhere else rather than
+# stop trading the coin. The venues agree on the RSI(14) 50/40 cross ~96% of the
+# time, so a substitute feed is a small, known deviation; no feed at all is a
+# silent halt, which is what actually cost a reversal. Set SIGNAL_FALLBACK=""
+# to turn it off and accept the halt instead.
+_FALLBACK = [x.strip().lower() for x in
+             os.getenv("SIGNAL_FALLBACK", "bybit,okx,binance").split(",") if x.strip()]
+
+
+def _ban_until(err) -> float | None:
+    """Binance states the ban's end in its own error. Honour it exactly rather
+    than guessing: it knows when it will answer again and we do not."""
+    m = _re.search(r"banned until (\d{10,13})", str(err))
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n / 1000.0 if n > 1e11 else float(n)
+
+
+def venue_ready(venue: str) -> bool:
+    """False while a venue is parked after failing."""
+    return time.time() >= _COOLDOWN.get((venue or "").strip().lower(), 0.0)
+
+
+def _park(v: str, err) -> float:
+    until = _ban_until(err)
+    if until is None:
+        pen = min((_BACKOFF.get(v, 0.0) * 2) or _BACKOFF_START, _BACKOFF_MAX)
+        _BACKOFF[v] = pen
+        until = time.time() + pen
+    _COOLDOWN[v] = until
+    return until
+
+
+def _poll(v, coin, interval, limit, attempts=2):
+    """One venue, up to `attempts` tries. Returns bars, or None after parking v."""
+    key = (v, str(coin).split(":", 1)[-1].upper(), interval)
+    for i in range(1, attempts + 1):
+        try:
+            out = _FETCH[v](coin, interval, limit)
+            if not out:
+                raise RuntimeError("empty candle list")
+            _LAST_GOOD[key] = out
+            _BACKOFF.pop(v, None)
+            _COOLDOWN.pop(v, None)
+            return out
+        except Exception as e:                            # noqa: BLE001
+            if i < attempts:
+                time.sleep(1.0)
+                continue
+            until = _park(v, e)
+            logger.warning(f"{v} candles for {coin} {interval} failed: {e} "
+                           f"- parking {v} for {max(until - time.time(), 0) / 60:.1f} min")
+            return None
+
+
+def fetch_candles(venue: str, coin: str, interval: str, limit: int, hl_client=None,
+                  stale_ok: bool = False):
     """Candles for `coin` from `venue`. 'hyperliquid' (or an unknown venue)
-    falls through to the Hyperliquid client the worker already holds."""
+    falls through to the Hyperliquid client the worker already holds.
+
+    On failure the signal path gets [] - never the last good series. A cross
+    evaluated against bars that predate it does not fail loudly; it quietly
+    stops trading the coin while every dashboard still reads healthy. [] makes
+    the caller skip the bar and look again, which costs a late entry at worst.
+    Pass stale_ok=True only where a stale price is genuinely better than none.
+    """
     v = (venue or "hyperliquid").strip().lower()
-    fn = _FETCH.get(v)
-    if fn is None:
+    if v not in _FETCH:
         if hl_client is None:
             raise RuntimeError(f"no client for signal venue {venue!r}")
         return hl_client.fetch_candles(coin, interval, limit)
-    key = (v, str(coin).upper(), interval)
-    for attempt in (1, 2):
-        try:
-            out = fn(coin, interval, limit)
-            if out:
-                _LAST_GOOD[key] = out
-                return out
-            raise RuntimeError("empty candle list")
-        except Exception as e:                            # noqa: BLE001
-            if attempt == 2:
-                stale = _LAST_GOOD.get(key)
-                logger.warning(f"{v} candles for {coin} {interval} failed: {e}"
-                               + (f" — serving the last good {len(stale)} bars"
-                                  if stale else " — no cached series to fall back on"))
-                return stale or []
-            time.sleep(1.0)
+    key = (v, str(coin).split(":", 1)[-1].upper(), interval)
+    if venue_ready(v):
+        out = _poll(v, coin, interval, limit)
+        if out:
+            return out
+    if stale_ok:
+        return _LAST_GOOD.get(key, [])
+    for alt in _FALLBACK:
+        if alt == v or alt not in _FETCH or not venue_ready(alt):
+            continue
+        out = _poll(alt, coin, interval, limit, attempts=1)
+        if out:
+            logger.warning(f"{v} is parked for {(_COOLDOWN[v] - time.time()) / 60:.0f} min "
+                           f"- reading {coin} {interval} from {alt} instead")
+            return out
+    return []

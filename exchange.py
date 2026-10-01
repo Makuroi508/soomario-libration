@@ -80,8 +80,21 @@ class SignalEngine:
         for coin in self.coins:
             try:
                 _tf, _ctf = config.rsi_tf(coin), config.chart_tf(coin)
+                # Gate the pull on the bar boundary, exactly as app.tick does.
+                # RSI is computed from closed bars, so between two closes there
+                # is nothing to learn and a re-pull is pure rate-limit pressure
+                # — the pressure that got the shared egress IP banned.
+                _bar_ms = config.chart_bar_seconds(coin) * 1000
+                _expect = (now_ms // _bar_ms) * _bar_ms - _bar_ms
+                _st0 = self.db.get_rsi_state(coin)
+                _seen0 = (int(_st0["last_closed_4h_ts"])
+                          if _st0 and _st0.get("last_closed_4h_ts") else None)
+                if _seen0 is not None and _seen0 >= _expect:
+                    continue
                 candles = feeds.fetch_candles(config.signal_venue(coin), coin, _tf,
                                               config.CANDLE_LIMIT, hl_client=self.hl)
+                if not candles:
+                    continue  # venue parked; evaluate when it answers
                 closed = signals.closed_candles(candles, now_ms)
                 # Chart timeframe decides WHEN; RSI timeframe decides WHAT.
                 if _ctf == _tf:

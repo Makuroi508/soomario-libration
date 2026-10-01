@@ -555,6 +555,8 @@ def tick(hl, db, pm, em, shadow):
                 continue
             candles = feeds.fetch_candles(config.signal_venue(coin), coin, _tf,
                                           config.CANDLE_LIMIT, hl_client=hl)
+            if not candles:
+                continue      # venue parked; evaluate when it answers
             closed = signals.closed_candles(candles, now_ms)
             # The chart timeframe decides WHEN the cross is evaluated; the RSI
             # timeframe decides what value is read. Same series when they match.

@@ -264,11 +264,15 @@ check("an unknown venue falls back rather than failing", len(stub.calls) == 2)
 
 feeds._LAST_GOOD[("binance", "SOL", "4h")] = [{"t": 1, "T": 2, "o": 1, "h": 1,
                                                "l": 1, "c": 1, "v": 0}]
-_real = feeds._FETCH["binance"]
+_real, _fb = feeds._FETCH["binance"], feeds._FALLBACK
 feeds._FETCH["binance"] = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+feeds._FALLBACK = []                       # no stand-in venue for this check
 got = feeds.fetch_candles("binance", "SOL", "4h", 200)
-feeds._FETCH["binance"] = _real
-check("a feed outage serves the last good series, not an empty one", len(got) == 1)
+stale = feeds.fetch_candles("binance", "SOL", "4h", 200, stale_ok=True)
+feeds._FETCH["binance"], feeds._FALLBACK = _real, _fb
+feeds._COOLDOWN.clear(), feeds._BACKOFF.clear()
+check("a feed outage never serves stale bars to the signal path", got == [])
+check("stale bars are still available where a stale mark is fine", len(stale) == 1)
 
 
 print("\n[7] per-coin size_mult")
