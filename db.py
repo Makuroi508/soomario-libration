@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS daily_prices (
   coin TEXT, d TEXT, close REAL,
   PRIMARY KEY (coin, d)
 );
+CREATE TABLE IF NOT EXISTS signal_inbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedupe TEXT UNIQUE, coin TEXT, state TEXT, price REAL, bar_ts TEXT,
+  src TEXT, raw TEXT, received_at TEXT, status TEXT DEFAULT 'pending',
+  acted_at TEXT, note TEXT
+);
 CREATE TABLE IF NOT EXISTS shadow_trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, side TEXT, trail_pct REAL,
   entry REAL, shadow_exit REAL, shadow_ret_pct REAL, shadow_net_pct REAL,
@@ -363,6 +369,37 @@ class DB:
         return (round(avg, 4), n) if n else (None, 0)
 
     # ── misses (fill-rate KPI) ─────────────────────────────────
+    # ── webhook inbox ──────────────────────────────────────────────
+    # The API thread writes here and the worker thread drains it. Two
+    # connections, WAL, busy_timeout — no shared handle, and no decision taken
+    # on a Flask request thread where a half-finished order could be abandoned
+    # mid-flight if the request were dropped.
+    def enqueue_signal(self, dedupe, coin, state, price, bar_ts, src, raw) -> bool:
+        """Queue one webhook signal. False means we have already seen it:
+        TradingView retries, and a duplicate must never become a second order."""
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO signal_inbox "
+            "(dedupe, coin, state, price, bar_ts, src, raw, received_at, status) "
+            "VALUES (?,?,?,?,?,?,?,?, 'pending')",
+            (dedupe, coin, state, price, bar_ts, src, raw, iso()))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def pending_signals(self, limit: int = 50) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM signal_inbox WHERE status = 'pending' "
+            "ORDER BY id ASC LIMIT ?", (limit,))]
+
+    def mark_signal(self, sid: int, status: str, note: str = ""):
+        self._conn.execute(
+            "UPDATE signal_inbox SET status = ?, note = ?, acted_at = ? WHERE id = ?",
+            (status, note[:300], iso(), sid))
+        self._conn.commit()
+
+    def recent_signals(self, n: int = 50) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM signal_inbox ORDER BY id DESC LIMIT ?", (n,))]
+
     def log_miss(self, coin: str, signal: str, reason: str):
         self._conn.execute(
             "INSERT INTO misses (coin, signal, reason, ts) VALUES (?,?,?,?)",

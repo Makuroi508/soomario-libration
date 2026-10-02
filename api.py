@@ -9,11 +9,15 @@ Soomario Libration — API routes
   GET /api/report       — financial report (?period=&format=json|md|html|zip)
   GET /api/equity       — equity curve + event markers (?tf=1d|1w|1m|all)  [SPEC v1.2]
   GET /api/stats        — KPIs: win rate, avg net %, fill rate, realized PnL
+  GET /api/signals      — the TradingView webhook inbox (?n=50)
+ POST /webhook/tradingview — TradingView's own fills, queued for the worker
 
 The worker owns the live HLClient + DB writes. The API only READS: status.json
 for the live snapshot, the JSONL logs for the curve, and a separate read-only
 SQLite handle (WAL) for closed-trade KPIs.
 """
+import hmac
+import json
 import logging
 import threading
 from datetime import datetime, timezone
@@ -257,6 +261,119 @@ def api_shadow():
 # ═══════════════════════════════════════════════════════════════
 #  Financial report — see report.py for the metric definitions
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+#  TradingView webhook — the chart's own fills
+# ═══════════════════════════════════════════════════════════════════
+# POST /webhook/tradingview with the alert message as JSON:
+#   {"secret":"...", "ticker":"{{ticker}}", "position":"{{strategy.market_position}}",
+#    "action":"{{strategy.order.action}}", "price":"{{close}}", "bar":"{{timenow}}"}
+#
+# The endpoint only QUEUES. It never opens, closes or sizes anything: the worker
+# owns every write and every order, and a Flask request thread that dies
+# mid-order would otherwise leave a position nobody booked. Queue, acknowledge,
+# let the next tick act — at most POLL_SECONDS later.
+_WEBHOOK_MAX_BYTES = 4096
+_STATE_WORDS = {"long": "long", "buy": "long", "short": "short", "sell": "short",
+                "flat": "flat", "close": "flat", "exit": "flat", "none": "flat"}
+
+
+def _parse_alert(body: str) -> dict:
+    """TradingView sends whatever the alert message says. JSON is what we ask
+    for; key=value is accepted so a hand-typed alert still works."""
+    body = (body or "").strip()
+    if not body:
+        return {}
+    if body[0] in "{[":
+        try:
+            d = json.loads(body)
+            return {str(k).lower(): v for k, v in d.items()} if isinstance(d, dict) else {}
+        except Exception:                                  # noqa: BLE001
+            return {}
+    out = {}
+    for part in body.replace(chr(10), ";").replace(",", ";").split(";"):
+        if "=" in part:
+            k, _, v = part.partition("=")
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _alert_state(d: dict):
+    """The resulting POSITION is what the book mirrors, not the order verb.
+    On a reversal TradingView sends action=buy with market_position=long; acting
+    on the verb alone would open a long without closing the short."""
+    for key in ("position", "market_position", "strategy.market_position", "state"):
+        v = str(d.get(key, "")).strip().lower()
+        if v in _STATE_WORDS:
+            return _STATE_WORDS[v]
+    for key in ("action", "order_action", "strategy.order.action", "side"):
+        v = str(d.get(key, "")).strip().lower()
+        if v in _STATE_WORDS:
+            return _STATE_WORDS[v]
+    return None
+
+
+def _alert_float(d: dict, *keys):
+    for k in keys:
+        try:
+            v = float(str(d.get(k, "")).replace(",", ""))
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+@app.route("/webhook/tradingview", methods=["POST"])
+@app.route("/webhook/signal", methods=["POST"])
+def webhook_tradingview():
+    if not config.WEBHOOK_SECRET:
+        return jsonify({"ok": False, "error": "webhook not configured"}), 503
+    raw = request.get_data(as_text=True) or ""
+    if len(raw) > _WEBHOOK_MAX_BYTES:
+        return jsonify({"ok": False, "error": "payload too large"}), 413
+    d = _parse_alert(raw)
+    supplied = str(d.get("secret") or request.args.get("k") or
+                   request.headers.get("X-Webhook-Secret") or "")
+    if not hmac.compare_digest(supplied, config.WEBHOOK_SECRET):
+        logger.warning(f"webhook rejected: bad or missing secret from "
+                       f"{request.headers.get('X-Forwarded-For', request.remote_addr)}")
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    coin = config.coin_from_ticker(d.get("ticker") or d.get("symbol") or d.get("coin"))
+    if not coin:
+        return jsonify({"ok": False, "error": "unknown symbol",
+                        "ticker": str(d.get("ticker") or d.get("symbol") or "")[:40]}), 400
+    state = _alert_state(d)
+    if not state:
+        return jsonify({"ok": False, "error": "no position/action in alert"}), 400
+    price = _alert_float(d, "price", "close", "entry")
+    bar = str(d.get("bar") or d.get("bar_time") or d.get("time") or
+              d.get("timenow") or "").strip()
+    # Without a bar stamp the only safe dedupe window is the minute: TradingView
+    # may retry an alert, and a retry must not become a second order.
+    dedupe = f"{coin}|{state}|{bar or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}"
+    scrubbed = {k: v for k, v in d.items() if k != "secret"}
+    fresh = _db().enqueue_signal(dedupe, coin, state, price, bar,
+                                 str(d.get("strategy") or "tradingview")[:60],
+                                 json.dumps(scrubbed)[:1000])
+    logger.info(f"webhook {'queued' if fresh else 'duplicate'}: {coin} -> {state}"
+                + (f" @ {price}" if price else "")
+                + ("" if config.SIGNAL_SOURCE == "webhook"
+                   else "  (SIGNAL_SOURCE=feed — recorded, NOT acted on)"))
+    return jsonify({"ok": True, "coin": coin, "state": state, "price": price,
+                    "queued": fresh, "duplicate": not fresh,
+                    "acted_on": config.SIGNAL_SOURCE == "webhook"}), 200
+
+
+@app.route("/api/signals")
+def api_signals():
+    """What the chart has sent and what the worker did with it."""
+    n = max(1, min(int(request.args.get("n", 50)), 200))
+    rows = _db().recent_signals(n)
+    return jsonify({"signal_source": config.SIGNAL_SOURCE,
+                    "webhook_configured": bool(config.WEBHOOK_SECRET),
+                    "count": len(rows), "signals": rows})
+
+
 @app.route("/api/report")
 def api_report():
     """Financial report bundle.

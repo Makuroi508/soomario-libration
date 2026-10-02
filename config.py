@@ -468,6 +468,66 @@ def is_cross_for(asset: str) -> bool:
     return False
 
 
+# ─── Signal source: this engine, or TradingView itself ──────────
+# The engine re-derives TradingView's decision from candles: same RSI, same
+# levels, same timeframes. That is a replica, and a replica drifts - a per-coin
+# trail that was retuned on the chart but not in COIN_PARAMS, a chart timeframe
+# that is 4h here and 30m there, a venue whose price crosses 50 a few basis
+# points before another's. Every one of those has already cost a position.
+#
+# SIGNAL_SOURCE=webhook stops guessing and lets the chart speak: TradingView
+# posts its own fills to /webhook/tradingview and the book mirrors them. The
+# candle path stays alive underneath for marks, the trailing backstop and the
+# dashboard, so a missed alert still cannot leave a position unmanaged.
+SIGNAL_SOURCE = os.getenv("SIGNAL_SOURCE", "feed").strip().lower()
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+# An alert that arrives long after its bar is a replay or a backlog flush, not a
+# signal. Acting on one enters at a price the chart never saw.
+WEBHOOK_MAX_AGE_SEC = _i("WEBHOOK_MAX_AGE_SEC", 900)
+# {{ticker}} is the chart's symbol, not the book's coin. Most resolve by rule;
+# the exceptions go in TV_SYMBOL_MAP, e.g. {"1000PEPEUSDT.P": "KPEPE"}.
+try:
+    TV_SYMBOL_MAP = {str(k).upper(): str(v).upper()
+                     for k, v in _json.loads(os.getenv("TV_SYMBOL_MAP", "{}")).items()}
+except Exception:                                      # noqa: BLE001
+    TV_SYMBOL_MAP = {}
+
+_QUOTES = ("USDTPERP", "USDCPERP", "USDPERP", "PERP", "USDT", "USDC", "USD")
+
+
+def coin_from_ticker(ticker: str):
+    """Map a TradingView symbol to one of this book's coins, or None.
+
+    Handles BINANCE:LTCUSDT.P, LTCUSDT.P, LTCUSDT and a bare LTC (which is what
+    {{syminfo.basecurrency}} sends). Returning None is deliberate: an unknown
+    symbol is refused at the door rather than guessed into a live order.
+    """
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return None
+    if t in TV_SYMBOL_MAP:
+        t = TV_SYMBOL_MAP[t]
+    else:
+        t = t.split(":", 1)[-1]                 # drop the exchange prefix
+        if t in TV_SYMBOL_MAP:
+            t = TV_SYMBOL_MAP[t]
+        else:
+            for suf in (".P", ".PS", ".3L", "!"):
+                if t.endswith(suf):
+                    t = t[: -len(suf)]
+            if t not in TV_SYMBOL_MAP:
+                for q in _QUOTES:
+                    if t.endswith(q) and len(t) > len(q):
+                        t = t[: -len(q)]
+                        break
+            t = TV_SYMBOL_MAP.get(t, t)
+    if t.startswith("1000") and t[4:]:          # 1000PEPE -> KPEPE convention
+        alt = "K" + t[4:]
+        if alt in COINS:
+            return alt
+    return t if t in COINS else None
+
+
 def summary() -> dict:
     return {
         "name": NAME,
@@ -486,6 +546,7 @@ def summary() -> dict:
         "daily_dd_pct": DAILY_DD_PCT,
         "max_dd": f"{MAX_DD_PCT}% {DD_TYPE}" if MAX_DD_PCT else "off",
         "reverse_on_signal": REVERSE_ON_SIGNAL,
+        "signal_source": SIGNAL_SOURCE,
         "equity_source": EQUITY_SOURCE,
         "dd_basis": DD_BASIS,
         "mode": "PAPER" if PAPER else ("DRY_RUN" if DRY_RUN else "LIVE"),

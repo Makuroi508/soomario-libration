@@ -513,6 +513,63 @@ def _log_tick(equity, total_upnl, n_open, max_conc):
                 f"open {n_open}/{max_conc}")
 
 
+def drain_signal_inbox(db, pm, em, shadow, marks):
+    """Act on what TradingView posted since the last tick.
+
+    The chart is the authority here: `state` is the position TradingView now
+    holds, so 'flat' closes, and 'long'/'short' enters or reverses through the
+    same maybe_enter() every other path uses - the gates (halts, capacity,
+    margin) still apply, because a prop account's rules outrank the chart's.
+    """
+    acted = 0
+    for sig in db.pending_signals():
+        coin, state = sig["coin"], sig["state"]
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(sig["received_at"])).total_seconds()
+        except Exception:                                 # noqa: BLE001
+            age = 0.0
+        # A backlog flush after an outage would otherwise enter at today's price
+        # on yesterday's signal.
+        if age > config.WEBHOOK_MAX_AGE_SEC:
+            db.mark_signal(sig["id"], "ignored", f"stale by {age / 60:.0f} min")
+            logger.warning(f"webhook {coin} -> {state} ignored: queued {age / 60:.0f} min ago")
+            continue
+        if coin not in config.COINS:
+            db.mark_signal(sig["id"], "ignored", "coin not in this book")
+            continue
+        try:
+            price = marks.get(coin) or sig["price"]
+            held = db.get_position(coin)
+            if state == "flat":
+                if not held:
+                    db.mark_signal(sig["id"], "done", "already flat")
+                    continue
+                fill = pm.close_one(held, reason="TV_EXIT", exit_manager=em)
+                if fill is None:
+                    db.mark_signal(sig["id"], "error", "close did not fill")
+                    logger.error(f"❌ {coin}: TradingView says flat but the close "
+                                 f"did not fill — retrying next tick")
+                    continue
+                db.mark_signal(sig["id"], "done", f"closed at {fill:.6f}")
+                acted += 1
+                continue
+            if held and held["side"] == state:
+                db.mark_signal(sig["id"], "done", "already in that position")
+                continue
+            pos = pm.maybe_enter(coin, state, price)
+            if pos:
+                shadow.on_open(pos)
+                db.mark_signal(sig["id"], "done", f"{state} at {pos['entry']:.6f}")
+                acted += 1
+            else:
+                db.mark_signal(sig["id"], "ignored", "a gate blocked it — see misses")
+        except Exception as e:                            # noqa: BLE001
+            db.mark_signal(sig["id"], "error", str(e))
+            logger.warning(f"webhook {coin} -> {state} failed: {e}")
+    return acted
+
+
 def tick(hl, db, pm, em, shadow):
     pm.maybe_reset_daily()
     now_ms = int(__import__("time").time() * 1000)
@@ -523,6 +580,11 @@ def tick(hl, db, pm, em, shadow):
     # trailed, backstopped, and marked on the dashboard until it exits.
     open_coins = [p["coin"] for p in db.open_positions()]
     marks = hl.get_all_prices(extra=open_coins) or {}
+
+    # TradingView's own fills come first: when the chart is the source, the
+    # candle path below is only keeping state warm.
+    if config.SIGNAL_SOURCE == "webhook":
+        drain_signal_inbox(db, pm, em, shadow, marks)
 
     # ── entries: evaluate the RSI cross only on a freshly closed 4h bar ──
     #
@@ -586,6 +648,10 @@ def tick(hl, db, pm, em, shadow):
             sig, _prev_r, _now_r = signals.cross_on_chart(
                 closed, rsi, chart_closed, config.long_level(coin), config.short_level(coin))
             db.set_rsi_state(coin, last_ts, _now_r)
+            if config.SIGNAL_SOURCE == "webhook":
+                # State stays warm (dashboard heat, and the watchdog that will
+                # compare this against the chart), but the chart decides.
+                continue
             if seen is None:
                 # Cold start: prime state but do NOT trade a cross that completed
                 # before we were watching — its close price is stale (the bar may

@@ -77,6 +77,10 @@ class SignalEngine:
         FRESHLY closed 4h bar this tick. Cold-start bars are primed but not traded
         (their close price is stale), matching the backtest's close fills."""
         fired = {}
+        if config.SIGNAL_SOURCE == "webhook":
+            # The chart is the authority; the VenueBooks are fed from the
+            # webhook inbox, not from a cross re-derived here.
+            return fired
         for coin in self.coins:
             try:
                 _tf, _ctf = config.rsi_tf(coin), config.chart_tf(coin)
